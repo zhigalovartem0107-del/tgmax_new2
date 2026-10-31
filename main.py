@@ -10,7 +10,7 @@ from maxapi.context import SimpleEventIsolation
 
 from config import settings
 from database import close_db, init_db, session_factory
-from handlers import get_routers
+from handlers import BOT_COMMANDS, get_routers
 from middlewares import DbSessionMiddleware, ServicesMiddleware, UserMiddleware
 from services import MusicService
 from services.ai import GeminiService
@@ -34,6 +34,18 @@ def build_dispatcher(gemini: GeminiService) -> Dispatcher:
     dp.register_inner_middleware(ServicesMiddleware(music=music, gemini=gemini))
     dp.include_routers(*get_routers())
     return dp
+
+
+async def sync_commands(bot: Bot) -> None:
+    """Replace the bot's "/" menu in MAX. The list is stored on MAX's side until replaced,
+    so without this it keeps showing whatever an earlier bot version set."""
+    try:
+        result = await bot.set_commands(*BOT_COMMANDS)
+    except Exception:
+        logger.exception("Could not update the bot command menu")
+        return
+    names = ", ".join(f"/{command.name}" for command in result.commands or [])
+    logger.info("Bot command menu on MAX: %s", names or "(empty)")
 
 
 def install_stop_signals(dp: Dispatcher) -> set[asyncio.Task]:
@@ -60,6 +72,7 @@ async def main() -> None:
     await init_db()
 
     bot = Bot(token=settings.bot_token.get_secret_value())
+    await sync_commands(bot)
     dp = build_dispatcher(gemini)
     stop_tasks = install_stop_signals(dp)
 
