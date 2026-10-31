@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     video_api_url: str | None = None
     video_api_key: SecretStr | None = None
 
+    # --- Gemini (lyrics) ---
+    gemini_api_key: SecretStr | None = None
+    gemini_model: str = "gemini-flash-latest"
+
     # --- Pricing (balance units) ---
     song_price: int = Field(default=1, ge=1)
 

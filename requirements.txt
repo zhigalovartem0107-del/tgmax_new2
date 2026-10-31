@@ -3,3 +3,4 @@ SQLAlchemy[asyncio]==2.1.6
 aiosqlite==0.22.1
 asyncpg==0.32.0
 pydantic-settings==2.16.2
+google-genai==2.34.0
