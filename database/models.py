@@ -1,8 +1,18 @@
 """ORM models."""
 
 from datetime import datetime, timezone
+from enum import StrEnum
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, MetaData, String, TypeDecorator
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    MetaData,
+    String,
+    Text,
+    TypeDecorator,
+)
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -80,3 +90,43 @@ class User(Base):
 
     def __repr__(self) -> str:
         return f"User(id={self.id}, balance={self.balance}, plan={self.subscription_plan!r})"
+
+
+class GenerationKind(StrEnum):
+    SONG = "song"
+    VIDEO = "video"
+
+
+class GenerationStatus(StrEnum):
+    PENDING = "pending"  # paid, not yet accepted by the provider
+    PROCESSING = "processing"  # accepted by the provider, waiting for the result
+    DONE = "done"
+    FAILED = "failed"  # cost refunded
+
+
+class SongMode(StrEnum):
+    LYRICS = "lyrics"  # the user sends their own lyrics
+    DESCRIPTION = "description"  # the AI writes lyrics from a description
+
+
+class Generation(Base):
+    __tablename__ = "generations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16))
+    mode: Mapped[str | None] = mapped_column(String(16))
+    style: Mapped[str | None] = mapped_column(String(128))
+    prompt: Mapped[str] = mapped_column(Text)
+    cost: Mapped[int]
+    status: Mapped[str] = mapped_column(String(16), default=GenerationStatus.PENDING)
+    provider_task_id: Mapped[str | None] = mapped_column(String(128))
+    error: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+    def __repr__(self) -> str:
+        return f"Generation(id={self.id}, kind={self.kind}, status={self.status})"

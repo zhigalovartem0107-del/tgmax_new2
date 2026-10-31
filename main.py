@@ -10,16 +10,24 @@ from maxapi import Bot, Dispatcher
 from config import settings
 from database import close_db, init_db, session_factory
 from handlers import get_routers
-from middlewares import DbSessionMiddleware, UserMiddleware
+from middlewares import DbSessionMiddleware, ServicesMiddleware, UserMiddleware
+from services import MusicService
 
 logger = logging.getLogger(__name__)
 
 
+def _secret(value) -> str | None:
+    return value.get_secret_value() if value else None
+
+
 def build_dispatcher() -> Dispatcher:
+    music = MusicService(settings.music_api_url, _secret(settings.music_api_key))
+
     dp = Dispatcher()
     # Inner middlewares run in registration order, only for updates some handler accepts.
     dp.register_inner_middleware(DbSessionMiddleware(session_factory))
     dp.register_inner_middleware(UserMiddleware())
+    dp.register_inner_middleware(ServicesMiddleware(music=music))
     dp.include_routers(*get_routers())
     return dp
 
