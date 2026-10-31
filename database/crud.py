@@ -3,7 +3,7 @@
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import User
+from database.models import Generation, GenerationStatus, User
 
 
 async def get_user(session: AsyncSession, user_id: int) -> User | None:
@@ -58,3 +58,32 @@ async def try_charge_balance(session: AsyncSession, user_id: int, amount: int) -
         .returning(User.balance)
     )
     return result.scalar_one_or_none()
+
+
+async def start_paid_generation(
+    session: AsyncSession,
+    user_id: int,
+    kind: str,
+    prompt: str,
+    cost: int,
+    mode: str | None = None,
+    style: str | None = None,
+) -> Generation | None:
+    """Charge `cost` and record the job in one transaction. None if funds are insufficient."""
+    if await try_charge_balance(session, user_id, cost) is None:
+        return None
+    generation = Generation(
+        user_id=user_id, kind=kind, mode=mode, style=style, prompt=prompt, cost=cost
+    )
+    session.add(generation)
+    await session.flush()
+    return generation
+
+
+async def fail_generation(session: AsyncSession, generation: Generation, error: str) -> None:
+    """Mark the job as failed and refund its cost. Safe to call more than once."""
+    if generation.status == GenerationStatus.FAILED:
+        return
+    generation.status = GenerationStatus.FAILED
+    generation.error = error[:1000]
+    await add_balance(session, generation.user_id, generation.cost)

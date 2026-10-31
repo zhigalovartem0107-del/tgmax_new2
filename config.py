@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     video_api_url: str | None = None
     video_api_key: SecretStr | None = None
 
+    # --- Pricing (balance units) ---
+    song_price: int = Field(default=1, ge=1)
+
     log_level: str = "INFO"
 
     @field_validator("admin_ids", mode="before")

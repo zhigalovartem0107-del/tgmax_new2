@@ -9,25 +9,25 @@ class MenuCallback(CallbackPayload, prefix="menu"):
 
 
 class MenuAction:
+    MAIN = "main"
     SONG = "song"
     VIDEO = "video"
     BALANCE = "balance"
     HELP = "help"
 
 
-def _button(text: str, action: str) -> CallbackButton:
+def menu_button(text: str, action: str) -> CallbackButton:
     return CallbackButton(text=text, payload=MenuCallback(action=action).pack())
 
 
 def main_menu_kb() -> AttachmentButton:
-    # Placeholder layout; it will follow the reference bot's flow.
     return (
         InlineKeyboardBuilder()
-        .row(_button("🎵 Создать песню", MenuAction.SONG))
-        .row(_button("🎬 Создать видео", MenuAction.VIDEO))
+        .row(menu_button("🎵 Создать песню", MenuAction.SONG))
+        .row(menu_button("🎬 Создать видео", MenuAction.VIDEO))
         .row(
-            _button("💰 Баланс", MenuAction.BALANCE),
-            _button("❓ Помощь", MenuAction.HELP),
+            menu_button("💰 Баланс", MenuAction.BALANCE),
+            menu_button("❓ Помощь", MenuAction.HELP),
         )
         .as_markup()
     )
