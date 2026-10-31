@@ -8,7 +8,7 @@ Requires Python 3.11+.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env   # then set MAX_BOT_TOKEN
+cp .env.example .env   # then set MAX_BOT_TOKEN and GEMINI_API_KEY
 python main.py
 ```
 
@@ -37,13 +37,14 @@ middlewares/
 handlers/
   start.py         /start, /cancel, Start button, main menu, help
   payments.py      balance, top-ups, subscriptions
-  song.py          song FSM: mode → style → text → confirm → charge → submit
+  song.py          song FSM: mode → style → text → confirm → AI lyrics → charge → submit
   video.py         video generation flow
   fallback.py      answers taps on outdated buttons
 keyboards/
   main_menu.py     main menu buttons and typed callback payloads
   song.py          song flow buttons and styles
 services/
+  ai.py            Gemini client that writes the lyrics
   music.py         song generation API client
   video.py         video generation API client
   yookassa.py      YooKassa payments client
@@ -51,4 +52,5 @@ tests/             pytest suite (real dispatcher, stubbed HTTP)
 ```
 
 Handlers get dependencies by parameter name: `session` (SQLAlchemy `AsyncSession`),
-`db_user` (`database.models.User`), `context` (FSM state), `music` (`MusicService`).
+`db_user` (`database.models.User`), `context` (FSM state), `music` (`MusicService`),
+`gemini` (`GeminiService`).

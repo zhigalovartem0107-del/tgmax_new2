@@ -119,7 +119,8 @@ class Generation(Base):
     kind: Mapped[str] = mapped_column(String(16))
     mode: Mapped[str | None] = mapped_column(String(16))
     style: Mapped[str | None] = mapped_column(String(128))
-    prompt: Mapped[str] = mapped_column(Text)
+    prompt: Mapped[str] = mapped_column(Text)  # what the user typed: lyrics or a description
+    lyrics: Mapped[str | None] = mapped_column(Text)  # lyrics sent to the music provider
     cost: Mapped[int]
     status: Mapped[str] = mapped_column(String(16), default=GenerationStatus.PENDING)
     provider_task_id: Mapped[str | None] = mapped_column(String(128))

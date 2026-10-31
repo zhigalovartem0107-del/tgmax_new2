@@ -7,6 +7,7 @@ from keyboards.song import (
     cancel_kb,
     confirm_kb,
     insufficient_funds_kb,
+    lyrics_kb,
     mode_kb,
     style_kb,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "cancel_kb",
     "confirm_kb",
     "insufficient_funds_kb",
+    "lyrics_kb",
     "main_menu_kb",
     "menu_button",
     "mode_kb",

@@ -68,12 +68,19 @@ async def start_paid_generation(
     cost: int,
     mode: str | None = None,
     style: str | None = None,
+    lyrics: str | None = None,
 ) -> Generation | None:
     """Charge `cost` and record the job in one transaction. None if funds are insufficient."""
     if await try_charge_balance(session, user_id, cost) is None:
         return None
     generation = Generation(
-        user_id=user_id, kind=kind, mode=mode, style=style, prompt=prompt, cost=cost
+        user_id=user_id,
+        kind=kind,
+        mode=mode,
+        style=style,
+        prompt=prompt,
+        lyrics=lyrics,
+        cost=cost,
     )
     session.add(generation)
     await session.flush()

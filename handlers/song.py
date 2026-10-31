@@ -1,4 +1,8 @@
-"""Song flow: mode → style → text → confirm → charge → submit to the provider."""
+"""Song flow: mode → style → text → confirm → (AI lyrics drafts) → charge → submit to the provider.
+
+Every button tap is answered at once by removing that message's buttons (its text
+stays), so a slow step can't be triggered twice; results arrive as new messages.
+"""
 
 import logging
 
@@ -20,11 +24,13 @@ from keyboards import (
     cancel_kb,
     confirm_kb,
     insufficient_funds_kb,
+    lyrics_kb,
     main_menu_kb,
     mode_kb,
     style_kb,
 )
 from services import MusicService
+from services.ai import GeminiService
 
 logger = logging.getLogger(__name__)
 router = Router(router_id="song")
@@ -33,8 +39,20 @@ STYLE_MAX = 120
 LYRICS_MAX = 3000
 DESCRIPTION_MAX = 500
 PREVIEW_MAX = 300
+LYRICS_DRAFTS_MAX = 5  # Gemini drafts per order: the first one plus 4 regenerations
 
 MODE_LABELS = {SongMode.LYRICS: "свой текст", SongMode.DESCRIPTION: "текст от ИИ"}
+
+WRITING = "✍️ Пишу текст песни…"
+REWRITING = "✍️ Пишу новый вариант…"
+DRAFT_FAILED = "😔 Не получилось написать текст. Попробуй ещё раз."
+REDRAFT_FAILED = (
+    "😔 Не получилось написать новый текст. "
+    "Можно создать песню с прошлым или попробовать ещё раз."
+)
+USE_LATEST = "Используй кнопки под последним текстом."
+SUBMITTED = "🎶 Песня создаётся! Пришлю её сюда, как только будет готова."
+SUBMIT_FAILED = "😔 Не удалось запустить генерацию. Средства вернулись на баланс."
 
 
 class SongForm(StatesGroup):
@@ -43,6 +61,7 @@ class SongForm(StatesGroup):
     custom_style = State()
     text = State()
     confirm = State()
+    lyrics = State()  # reviewing a Gemini draft
 
 
 def _message_text(event: MessageCreated) -> str:
@@ -70,6 +89,112 @@ def _summary(data: dict, user: User) -> str:
         f"{label}: {preview}\n\n"
         f"💰 Стоимость: {settings.song_price} (на балансе: {user.balance})"
     )
+
+
+def _lyrics_text(lyrics: str) -> str:
+    return f"📝 Текст песни:\n\n{lyrics}\n\n💰 Создание песни: {settings.song_price}"
+
+
+def _is_current(payload: SongCallback, data: dict) -> bool:
+    return payload.value == str(data.get("lyrics_version"))
+
+
+async def _freeze(event: MessageCallback, notification: str | None = None) -> None:
+    """Answer the tap: keep the message text, remove its buttons."""
+    body = event.message.body if event.message else None
+    await event.answer(
+        notification=notification,
+        new_text=body.text if body else None,
+        attachments=[],
+        raise_if_not_exists=False,
+    )
+
+
+async def _send_insufficient_funds(event: MessageCallback, user: User) -> None:
+    await event.send(
+        text=f"😔 Недостаточно средств: нужно {settings.song_price}, на балансе {user.balance}.",
+        attachments=[insufficient_funds_kb()],
+    )
+
+
+async def _draft(event: MessageCallback, gemini: GeminiService, data: dict) -> str | None:
+    """A Gemini draft that fits the lyrics limit, or None if Gemini failed."""
+    try:
+        async with event.typing():
+            lyrics = await gemini.write_lyrics(data["text"], data["style"])
+    except Exception:
+        logger.exception("Gemini lyrics draft failed")
+        return None
+    if len(lyrics) > LYRICS_MAX:
+        logger.warning("Gemini lyrics draft too long: %d chars", len(lyrics))
+        return None
+    return lyrics
+
+
+async def _write_lyrics(
+    event: MessageCallback,
+    context: BaseContext,
+    session: AsyncSession,
+    gemini: GeminiService,
+    data: dict,
+) -> None:
+    await session.commit()  # no DB transaction stays open while Gemini works
+    version = data.get("lyrics_version", 0)
+
+    lyrics = await _draft(event, gemini, data)
+    if lyrics is None:
+        if version:  # the previous draft is still usable
+            await event.send(text=REDRAFT_FAILED, attachments=[lyrics_kb(version)])
+        else:  # state stays `confirm`, so "✅ Создать" retries
+            await event.send(text=DRAFT_FAILED, attachments=[confirm_kb()])
+        return
+
+    version += 1
+    await context.update_data(lyrics=lyrics, lyrics_version=version)
+    await context.set_state(SongForm.lyrics)
+    await event.send(
+        text=_lyrics_text(lyrics),
+        attachments=[lyrics_kb(version, can_regenerate=version < LYRICS_DRAFTS_MAX)],
+    )
+
+
+async def _submit_song(
+    event: MessageCallback,
+    session: AsyncSession,
+    db_user: User,
+    music: MusicService,
+    data: dict,
+    lyrics: str,
+) -> None:
+    """Charge the balance, record the order and hand the lyrics to the music provider."""
+    generation = await crud.start_paid_generation(
+        session,
+        db_user.id,
+        GenerationKind.SONG,
+        prompt=data["text"],
+        cost=settings.song_price,
+        mode=data["mode"],
+        style=data["style"],
+        lyrics=lyrics,
+    )
+    if generation is None:
+        await _send_insufficient_funds(event, db_user)
+        return
+    await session.commit()  # the charge is stored before the provider is called
+
+    try:
+        task_id = await music.generate_song(lyrics=lyrics, style=data["style"])
+    except Exception as exc:
+        logger.exception("Generation %s: provider call failed", generation.id)
+        await crud.fail_generation(session, generation, repr(exc))
+        await session.commit()  # the refund is stored before the user is told
+        await event.send(text=SUBMIT_FAILED, attachments=[main_menu_kb()])
+        return
+
+    generation.status = GenerationStatus.PROCESSING
+    generation.provider_task_id = task_id
+    await session.commit()
+    await event.send(text=SUBMITTED, attachments=[main_menu_kb()])
 
 
 @router.message_callback(MenuCallback.filter(F.action == MenuAction.SONG))
@@ -154,48 +279,57 @@ async def on_confirm(
     session: AsyncSession,
     db_user: User,
     music: MusicService,
+    gemini: GeminiService,
 ) -> None:
     data = await context.get_data()
-    await context.clear()  # a repeated tap on "Создать" no longer matches this handler
 
-    generation = await crud.start_paid_generation(
-        session,
-        db_user.id,
-        GenerationKind.SONG,
-        prompt=data["text"],
-        cost=settings.song_price,
-        mode=data["mode"],
-        style=data["style"],
-    )
-    if generation is None:
-        await event.answer(
-            new_text=(
-                f"😔 Недостаточно средств: нужно {settings.song_price}, "
-                f"на балансе {db_user.balance}."
-            ),
-            attachments=[insufficient_funds_kb()],
-        )
-        return
-    await session.commit()  # the charge is stored before the provider is called
-
-    try:
-        task_id = await music.generate_song(
-            prompt=data["text"],
-            style=data["style"],
-            custom_lyrics=data["mode"] == SongMode.LYRICS,
-        )
-    except Exception as exc:
-        logger.exception("Generation %s: provider call failed", generation.id)
-        await crud.fail_generation(session, generation, repr(exc))
-        await event.answer(
-            new_text="😔 Не удалось запустить генерацию. Средства вернулись на баланс.",
-            attachments=[main_menu_kb()],
-        )
+    if data["mode"] == SongMode.LYRICS:  # the user's own text goes straight to the provider
+        await context.clear()
+        await _freeze(event)
+        await _submit_song(event, session, db_user, music, data, lyrics=data["text"])
         return
 
-    generation.status = GenerationStatus.PROCESSING
-    generation.provider_task_id = task_id
-    await event.answer(
-        new_text="🎶 Песня создаётся! Пришлю её сюда, как только будет готова.",
-        attachments=[main_menu_kb()],
-    )
+    if db_user.balance < settings.song_price:  # no AI drafts for orders that can't be paid
+        await context.clear()
+        await _freeze(event)
+        await _send_insufficient_funds(event, db_user)
+        return
+
+    await _freeze(event, notification=WRITING)
+    await _write_lyrics(event, context, session, gemini, data)
+
+
+@router.message_callback(SongCallback.filter(F.action == SongAction.REGENERATE), SongForm.lyrics)
+async def on_regenerate(
+    event: MessageCallback,
+    context: BaseContext,
+    session: AsyncSession,
+    gemini: GeminiService,
+    payload: SongCallback,
+) -> None:
+    data = await context.get_data()
+    if not _is_current(payload, data) or data["lyrics_version"] >= LYRICS_DRAFTS_MAX:
+        await event.answer(notification=USE_LATEST)
+        return
+
+    await _freeze(event, notification=REWRITING)
+    await _write_lyrics(event, context, session, gemini, data)
+
+
+@router.message_callback(SongCallback.filter(F.action == SongAction.CREATE), SongForm.lyrics)
+async def on_create_song(
+    event: MessageCallback,
+    context: BaseContext,
+    session: AsyncSession,
+    db_user: User,
+    music: MusicService,
+    payload: SongCallback,
+) -> None:
+    data = await context.get_data()
+    if not _is_current(payload, data):
+        await event.answer(notification=USE_LATEST)
+        return
+
+    await context.clear()  # a repeated tap no longer matches this handler
+    await _freeze(event)
+    await _submit_song(event, session, db_user, music, data, lyrics=data["lyrics"])

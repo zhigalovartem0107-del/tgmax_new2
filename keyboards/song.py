@@ -16,6 +16,8 @@ class SongAction:
     MODE = "mode"
     STYLE = "style"
     CONFIRM = "confirm"
+    CREATE = "create"  # value: lyrics draft version
+    REGENERATE = "regen"  # value: lyrics draft version
 
 
 SONG_STYLES = {
@@ -69,6 +71,15 @@ def confirm_kb() -> AttachmentButton:
         .row(_cancel_button())
         .as_markup()
     )
+
+
+def lyrics_kb(version: int, can_regenerate: bool = True) -> AttachmentButton:
+    builder = InlineKeyboardBuilder().row(
+        _song_button("✅ Создать песню", SongAction.CREATE, str(version))
+    )
+    if can_regenerate:
+        builder.row(_song_button("🔄 Перегенерировать текст", SongAction.REGENERATE, str(version)))
+    return builder.row(_cancel_button()).as_markup()
 
 
 def insufficient_funds_kb() -> AttachmentButton:
