@@ -1,2 +1,5 @@
-telethon
-requests
+maxapi==1.2.3
+SQLAlchemy[asyncio]==2.1.6
+aiosqlite==0.22.1
+asyncpg==0.32.0
+pydantic-settings==2.16.2
