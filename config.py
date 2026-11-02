@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # Balance packages for /shop: "units:rubles,units:rubles".
     shop_packages: str = "5:199,15:499,40:990"
 
+    # --- Social sources (services/social) ---
+    vk_token: SecretStr | None = None  # VK service key (official API)
+    vk_cookies: SecretStr | None = None  # owner's logged-in vk.com cookies, fallback
+    tiktok_cookies: SecretStr | None = None  # owner's logged-in tiktok.com cookies, fallback
+
     # --- Generation providers ---
     music_api_url: str | None = None
     music_api_key: SecretStr | None = None
