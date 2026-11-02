@@ -92,6 +92,40 @@ class User(Base):
         return f"User(id={self.id}, balance={self.balance}, plan={self.subscription_plan!r})"
 
 
+class PaymentStatus(StrEnum):
+    PENDING = "pending"  # link sent, waiting for YooKassa
+    SUCCEEDED = "succeeded"  # paid, balance credited
+    CANCELED = "canceled"  # YooKassa canceled it
+    EXPIRED = "expired"  # not paid in time; still checked for a late success for a day
+    FAILED = "failed"  # YooKassa refused to create it
+
+
+class Payment(Base):
+    """A /shop order: a balance package paid through YooKassa."""
+
+    __tablename__ = "payments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    chat_id: Mapped[int | None] = mapped_column(BigInteger)  # where the order was made (FSM key)
+    units: Mapped[int]  # balance to credit
+    amount_kopecks: Mapped[int]
+    email: Mapped[str | None] = mapped_column(String(254))
+    yookassa_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    confirmation_url: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default=PaymentStatus.PENDING, index=True)
+    reminded: Mapped[bool] = mapped_column(default=False)
+    error: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+    def __repr__(self) -> str:
+        return f"Payment(id={self.id}, status={self.status}, units={self.units})"
+
+
 class GenerationKind(StrEnum):
     SONG = "song"
     VIDEO = "video"

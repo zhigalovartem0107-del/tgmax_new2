@@ -13,6 +13,7 @@ BOT_COMMANDS = [
     BotCommand(name="start", description="Главное меню"),
     BotCommand(name="help", description="Помощь"),
     BotCommand(name="cancel", description="Отменить текущее действие"),
+    BotCommand(name="shop", description="Пополнить баланс"),
 ]
 
 HELP_TEXT = "❓ Помощь\n\n" + "\n".join(f"/{c.name} — {c.description}" for c in BOT_COMMANDS)

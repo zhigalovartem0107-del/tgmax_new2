@@ -12,6 +12,9 @@ os.environ["MAX_BOT_TOKEN"] = "test-token"
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TMP}/test.db"
 os.environ["SONG_PRICE"] = "10"
 os.environ["OPENROUTER_API_KEY"] = "test-openrouter-key"
+os.environ["TERMS_URL"] = "https://example.com/terms"
+os.environ["PRIVACY_URL"] = "https://example.com/privacy"
+os.environ["SHOP_PACKAGES"] = "5:199,15:499"
 
 import pytest  # noqa: E402
 from maxapi import Bot  # noqa: E402
@@ -54,18 +57,47 @@ class Sent:
 
     @property
     def buttons(self) -> dict[str, str]:
-        """Button text -> callback payload."""
+        """Button text -> callback payload (link buttons: their url)."""
         result = {}
         for attachment in self.attachments or []:
             for row in attachment.payload.buttons:
                 for button in row:
-                    result[button.text] = button.payload
+                    result[button.text] = getattr(button, "payload", None) or getattr(button, "url", None)
         return result
 
 
+class FakeYooKassa:
+    """Stands in for services.yookassa.YooKassaService: payments live in memory."""
+
+    configured = True
+
+    def __init__(self) -> None:
+        self.created: list[dict] = []
+        self.status: dict[str, str] = {}
+        self.fail: Exception | None = None
+        self.status_fail: Exception | None = None
+
+    async def create_payment(self, amount_kopecks, description, email=None, metadata=None):
+        if self.fail:
+            raise self.fail
+        pid = f"pay-{len(self.created) + 1}"
+        self.created.append({"id": pid, "amount_kopecks": amount_kopecks, "description": description,
+                             "email": email, "metadata": metadata})
+        self.status[pid] = "pending"
+        return pid, f"https://yoomoney.ru/checkout/{pid}"
+
+    async def get_status(self, pid):
+        if self.status_fail:
+            raise self.status_fail
+        return self.status.get(pid, "pending")
+
+    async def close(self):
+        pass
+
+
 class BotHarness:
-    def __init__(self, bot: Bot, dp, sent: list[Sent]) -> None:
-        self.bot, self.dp, self.sent = bot, dp, sent
+    def __init__(self, bot: Bot, dp, sent: list[Sent], yookassa: FakeYooKassa) -> None:
+        self.bot, self.dp, self.sent, self.yookassa = bot, dp, sent, yookassa
         self._ids = itertools.count(1)
 
     @property
@@ -148,9 +180,10 @@ async def bot(monkeypatch) -> BotHarness:
     max_bot = Bot(token="test-token", auto_requests=False)
     ai = AIService.from_settings(settings)
     music = MusicService(None, None)
-    dp = app.build_dispatcher(ai, music)
+    yookassa = FakeYooKassa()
+    dp = app.build_dispatcher(ai, music, yookassa)
     await dp.startup(max_bot)  # same preparation start_polling does
-    yield BotHarness(max_bot, dp, sent)
+    yield BotHarness(max_bot, dp, sent, yookassa)
     await max_bot.close_session()
     await ai.close()
     await music.close()

@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     # --- Payments (YooKassa) ---
     yookassa_shop_id: str | None = None
     yookassa_secret_key: SecretStr | None = None
+    # The shop's own email for the 54-FZ receipt when the buyer has no email (optional).
+    yookassa_receipt_email: str | None = None
+    # Legal documents shown before payment.
+    terms_url: str = ""
+    privacy_url: str = ""
+    # Balance packages for /shop: "units:rubles,units:rubles".
+    shop_packages: str = "5:199,15:499,40:990"
 
     # --- Generation providers ---
     music_api_url: str | None = None
@@ -48,6 +55,16 @@ class Settings(BaseSettings):
     song_price: int = Field(default=1, ge=1)
 
     log_level: str = "INFO"
+
+    @property
+    def packages(self) -> list[tuple[int, int]]:
+        """[(balance units, price in rubles)] from SHOP_PACKAGES."""
+        result = []
+        for part in self.shop_packages.replace(";", ",").split(","):
+            if ":" in part:
+                units, rubles = part.split(":", 1)
+                result.append((int(units), int(rubles)))
+        return result
 
     @field_validator("admin_ids", mode="before")
     @classmethod

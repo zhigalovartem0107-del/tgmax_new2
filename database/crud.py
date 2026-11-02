@@ -6,7 +6,7 @@ from datetime import timedelta
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import Generation, GenerationStatus, User, utcnow
+from database.models import Generation, GenerationStatus, Payment, PaymentStatus, User, utcnow
 
 
 @dataclass(frozen=True)
@@ -130,4 +130,75 @@ async def get_stats(session: AsyncSession) -> Stats:
         generations_by_status=dict(rows.all()),
         spent=spent,
         balances=balances,
+    )
+
+
+# --- Payments (/shop) ---
+
+async def create_payment(
+    session: AsyncSession, user_id: int, chat_id: int | None, units: int, amount_kopecks: int, email: str | None
+) -> Payment:
+    payment = Payment(user_id=user_id, chat_id=chat_id, units=units, amount_kopecks=amount_kopecks, email=email)
+    session.add(payment)
+    await session.flush()
+    return payment
+
+
+async def set_payment_link(session: AsyncSession, payment_id: int, yookassa_id: str, url: str) -> None:
+    await session.execute(
+        update(Payment).where(Payment.id == payment_id).values(yookassa_id=yookassa_id, confirmation_url=url)
+    )
+
+
+async def fail_payment(session: AsyncSession, payment_id: int, error: str) -> None:
+    await session.execute(
+        update(Payment).where(Payment.id == payment_id).values(status=PaymentStatus.FAILED, error=error[:2000])
+    )
+
+
+async def complete_payment(session: AsyncSession, payment_id: int) -> int | None:
+    """Mark paid and credit the balance exactly once. Returns the credited units, or None if it was
+    already completed (a second check or the worker got there first)."""
+    row = (
+        await session.execute(
+            update(Payment)
+            .where(Payment.id == payment_id,
+                   Payment.status.in_([PaymentStatus.PENDING, PaymentStatus.EXPIRED]))
+            .values(status=PaymentStatus.SUCCEEDED)
+            .returning(Payment.user_id, Payment.units)
+        )
+    ).first()
+    if row is None:
+        return None
+    await add_balance(session, row.user_id, row.units)
+    return row.units
+
+
+async def close_payment(session: AsyncSession, payment_id: int, status: PaymentStatus) -> bool:
+    """Pending -> canceled/expired. False if it is no longer pending."""
+    result = await session.execute(
+        update(Payment)
+        .where(Payment.id == payment_id, Payment.status == PaymentStatus.PENDING)
+        .values(status=status)
+    )
+    return result.rowcount == 1
+
+
+async def mark_reminded(session: AsyncSession, payment_id: int) -> None:
+    await session.execute(update(Payment).where(Payment.id == payment_id).values(reminded=True))
+
+
+async def open_payments(session: AsyncSession, late_window: timedelta) -> list[Payment]:
+    """Payments still worth checking: pending ones, and expired ones younger than late_window."""
+    since = utcnow() - late_window
+    return list(
+        (
+            await session.scalars(
+                select(Payment).where(
+                    Payment.yookassa_id.is_not(None),
+                    (Payment.status == PaymentStatus.PENDING)
+                    | ((Payment.status == PaymentStatus.EXPIRED) & (Payment.created_at >= since)),
+                )
+            )
+        ).all()
     )

@@ -51,6 +51,7 @@ async def test_sync_commands_replaces_menu_on_max(monkeypatch):
                     {"name": "start", "description": "Главное меню"},
                     {"name": "help", "description": "Помощь"},
                     {"name": "cancel", "description": "Отменить текущее действие"},
+                    {"name": "shop", "description": "Пополнить баланс"},
                 ]
             },
         )
