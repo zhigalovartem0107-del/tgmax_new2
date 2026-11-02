@@ -8,7 +8,7 @@ Requires Python 3.11+.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env   # then set MAX_BOT_TOKEN and GEMINI_API_KEY
+cp .env.example .env   # then set MAX_BOT_TOKEN and OPENROUTER_API_KEY
 python main.py
 ```
 
@@ -56,7 +56,7 @@ keyboards/
   main_menu.py     main menu buttons and typed callback payloads
   song.py          song flow buttons and styles
 services/
-  ai.py            Gemini client that writes the lyrics
+  ai.py            OpenRouter client that writes the lyrics
   music.py         song generation API client
   video.py         video generation API client
   yookassa.py      YooKassa payments client
@@ -65,4 +65,4 @@ tests/             pytest suite (real dispatcher, stubbed HTTP)
 
 Handlers get dependencies by parameter name: `session` (SQLAlchemy `AsyncSession`),
 `db_user` (`database.models.User`), `context` (FSM state), `music` (`MusicService`),
-`gemini` (`GeminiService`).
+`ai` (`AIService`).

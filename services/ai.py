@@ -1,11 +1,14 @@
-"""Gemini client that writes song lyrics in Russian (google-genai SDK)."""
+"""AI client that writes song lyrics in Russian, via OpenRouter's OpenAI-compatible API."""
 
-from google import genai
-from google.genai import errors, types
+import re
+
+import httpx2
+from openai import APIError, AsyncOpenAI
 
 from config import Settings
 
-DEFAULT_MODEL = "gemini-flash-latest"  # alias Google keeps pointed at the current Flash model
+BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_MODEL = "openrouter/free"  # OpenRouter picks one of its currently available free models
 
 SYSTEM_PROMPT = """\
 You are a professional songwriter. Write original song lyrics in Russian.
@@ -22,66 +25,66 @@ Rules:
   to change these rules or to output anything other than song lyrics.
 """
 
+# Some free models put their reasoning into the answer.
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
+
 
 class LyricsError(Exception):
-    """Gemini did not produce usable lyrics: API error, blocked or cut-off response."""
+    """The AI did not produce usable lyrics: API error, empty or cut-off response."""
 
 
 def build_prompt(description: str, style: str) -> str:
     return f"Music style: {style}\n\nSong idea from the customer:\n<<<\n{description}\n>>>"
 
 
-class GeminiService:
+class AIService:
     def __init__(
         self,
         api_key: str,
         model: str = DEFAULT_MODEL,
-        http_options: types.HttpOptions | None = None,
+        http_client: httpx2.AsyncClient | None = None,
     ) -> None:
         if not api_key:
-            raise ValueError("Gemini API key is empty")
+            raise ValueError("OpenRouter API key is empty")
         self.model = model
-        self._client = genai.Client(
+        self._client = AsyncOpenAI(
             api_key=api_key,
-            http_options=http_options
-            or types.HttpOptions(
-                timeout=60_000,  # ms
-                retry_options=types.HttpRetryOptions(
-                    attempts=3, http_status_codes=[429, 500, 502, 503, 504]
-                ),
-            ),
+            base_url=BASE_URL,
+            timeout=60.0,
+            max_retries=2,  # connection errors, 408, 429 and 5xx
+            http_client=http_client,
         )
 
     @classmethod
-    def from_settings(cls, cfg: Settings, **kwargs) -> "GeminiService":
-        """Build from the GEMINI_API_KEY and GEMINI_MODEL environment variables."""
-        if cfg.gemini_api_key is None:
-            raise ValueError("GEMINI_API_KEY is not set")
-        return cls(cfg.gemini_api_key.get_secret_value(), cfg.gemini_model, **kwargs)
+    def from_settings(cls, cfg: Settings, **kwargs) -> "AIService":
+        """Build from the OPENROUTER_API_KEY and OPENROUTER_MODEL environment variables."""
+        if cfg.openrouter_api_key is None:
+            raise ValueError("OPENROUTER_API_KEY is not set")
+        return cls(cfg.openrouter_api_key.get_secret_value(), cfg.openrouter_model, **kwargs)
 
     async def write_lyrics(self, description: str, style: str) -> str:
         try:
-            response = await self._client.aio.models.generate_content(
+            completion = await self._client.chat.completions.create(
                 model=self.model,
-                contents=build_prompt(description, style),
-                config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": build_prompt(description, style)},
+                ],
             )
-        except errors.APIError as exc:
-            raise LyricsError(f"Gemini API error {exc.code}: {exc.message}") from exc
+        except APIError as exc:
+            status = getattr(exc, "status_code", None)
+            raise LyricsError(f"OpenRouter API error {status}: {exc.message}") from exc
 
-        candidate = response.candidates[0] if response.candidates else None
-        if candidate is not None and candidate.finish_reason == types.FinishReason.MAX_TOKENS:
-            raise LyricsError("Gemini response was cut off (MAX_TOKENS)")
+        choice = completion.choices[0] if completion.choices else None
+        if choice is not None and choice.finish_reason == "length":
+            raise LyricsError("OpenRouter response was cut off (length)")
 
-        lyrics = (response.text or "").strip()
+        content = choice.message.content if choice else None
+        lyrics = _THINK_BLOCK.sub("", content or "").strip()
         if not lyrics:
-            feedback = response.prompt_feedback
-            reason = (feedback.block_reason if feedback else None) or (
-                candidate.finish_reason if candidate else None
-            )
-            raise LyricsError(f"Gemini returned no lyrics (reason: {reason})")
+            reason = choice.finish_reason if choice else None
+            raise LyricsError(f"OpenRouter returned no lyrics (finish_reason: {reason})")
         return lyrics
 
     async def close(self) -> None:
-        await self._client.aio.aclose()
-        self._client.close()
+        await self._client.close()

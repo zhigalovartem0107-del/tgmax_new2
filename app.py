@@ -13,7 +13,7 @@ from database import close_db, init_db, session_factory
 from handlers import BOT_COMMANDS, get_routers
 from middlewares import DbSessionMiddleware, ServicesMiddleware, UserMiddleware
 from services import MusicService
-from services.ai import GeminiService
+from services.ai import AIService
 
 logger = logging.getLogger(__name__)
 
@@ -22,16 +22,16 @@ def _secret(value) -> str | None:
     return value.get_secret_value() if value else None
 
 
-def build_dispatcher(gemini: GeminiService) -> Dispatcher:
+def build_dispatcher(ai: AIService) -> Dispatcher:
     music = MusicService(settings.music_api_url, _secret(settings.music_api_key))
 
-    # Updates from different users run concurrently (a Gemini call takes seconds);
+    # Updates from different users run concurrently (an AI call takes seconds);
     # updates from one user stay in order, so their FSM steps never race.
     dp = Dispatcher(use_create_task=True, event_isolation=SimpleEventIsolation())
     # Inner middlewares run in registration order, only for updates some handler accepts.
     dp.register_inner_middleware(DbSessionMiddleware(session_factory))
     dp.register_inner_middleware(UserMiddleware())
-    dp.register_inner_middleware(ServicesMiddleware(music=music, gemini=gemini))
+    dp.register_inner_middleware(ServicesMiddleware(music=music, ai=ai))
     dp.include_routers(*get_routers())
     return dp
 
@@ -65,12 +65,12 @@ def install_stop_signals(dp: Dispatcher) -> set[asyncio.Task]:
 
 async def main() -> None:
     logging.getLogger().setLevel(settings.log_level.upper())
-    gemini = GeminiService.from_settings(settings)
+    ai = AIService.from_settings(settings)
     await init_db()
 
     bot = Bot(token=settings.bot_token.get_secret_value())
     await sync_commands(bot)
-    dp = build_dispatcher(gemini)
+    dp = build_dispatcher(ai)
     stop_tasks = install_stop_signals(dp)
 
     logger.info("Bot is starting")
@@ -80,6 +80,6 @@ async def main() -> None:
         if stop_tasks:
             await asyncio.gather(*stop_tasks, return_exceptions=True)
         await bot.close_session()
-        await gemini.close()
+        await ai.close()
         await close_db()
         logger.info("Bot stopped")

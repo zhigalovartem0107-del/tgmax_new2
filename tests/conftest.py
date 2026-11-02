@@ -11,7 +11,7 @@ _TMP = tempfile.mkdtemp(prefix="maxbot-tests-")
 os.environ["MAX_BOT_TOKEN"] = "test-token"
 os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{_TMP}/test.db"
 os.environ["SONG_PRICE"] = "10"
-os.environ["GEMINI_API_KEY"] = "test-gemini-key"
+os.environ["OPENROUTER_API_KEY"] = "test-openrouter-key"
 
 import pytest  # noqa: E402
 from maxapi import Bot  # noqa: E402
@@ -21,7 +21,7 @@ from maxapi.types import User as MaxUser  # noqa: E402
 import app  # noqa: E402
 from config import settings  # noqa: E402
 from database import Base, close_db, engine, session_factory  # noqa: E402
-from services.ai import GeminiService  # noqa: E402
+from services.ai import AIService  # noqa: E402
 
 USER_ID = 777
 CHAT_ID = 555
@@ -144,9 +144,9 @@ async def bot(monkeypatch) -> BotHarness:
     monkeypatch.setattr(Bot, "get_me", get_me)
 
     max_bot = Bot(token="test-token", auto_requests=False)
-    gemini = GeminiService.from_settings(settings)
-    dp = app.build_dispatcher(gemini)
+    ai = AIService.from_settings(settings)
+    dp = app.build_dispatcher(ai)
     await dp.startup(max_bot)  # same preparation start_polling does
     yield BotHarness(max_bot, dp, sent)
     await max_bot.close_session()
-    await gemini.close()
+    await ai.close()

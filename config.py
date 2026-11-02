@@ -40,9 +40,9 @@ class Settings(BaseSettings):
     video_api_url: str | None = None
     video_api_key: SecretStr | None = None
 
-    # --- Gemini (lyrics) ---
-    gemini_api_key: SecretStr | None = None
-    gemini_model: str = "gemini-flash-latest"
+    # --- AI lyrics (OpenRouter) ---
+    openrouter_api_key: SecretStr | None = None
+    openrouter_model: str = "openrouter/free"
 
     # --- Pricing (balance units) ---
     song_price: int = Field(default=1, ge=1)

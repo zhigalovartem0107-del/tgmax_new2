@@ -7,7 +7,7 @@ from sqlalchemy import select
 from database import Generation, GenerationStatus, crud
 from handlers.song import LYRICS_DRAFTS_MAX, LYRICS_MAX, STYLE_MAX
 from services import MusicService
-from services.ai import GeminiService, LyricsError
+from services.ai import AIService, LyricsError
 
 PRICE = 10  # SONG_PRICE in conftest
 LYRICS_BUTTONS = {"✅ Создать песню", "🔄 Перегенерировать текст", "❌ Отмена"}
@@ -18,8 +18,8 @@ def lyrics_message(lyrics: str) -> str:
 
 
 @pytest.fixture(autouse=True)
-def gemini(monkeypatch):
-    """Fake Gemini: returns queued drafts in order ("Текст N" by default); queued errors are raised."""
+def ai(monkeypatch):
+    """Fake AI: returns queued drafts in order ("Текст N" by default); queued errors are raised."""
     fake = SimpleNamespace(calls=[], drafts=[])
 
     async def write_lyrics(self, description, style):
@@ -29,7 +29,7 @@ def gemini(monkeypatch):
             raise draft
         return draft
 
-    monkeypatch.setattr(GeminiService, "write_lyrics", write_lyrics)
+    monkeypatch.setattr(AIService, "write_lyrics", write_lyrics)
     return fake
 
 
@@ -68,7 +68,7 @@ async def _order_ai_rock_song(bot):
     await bot.text("песня про кота")
 
 
-async def test_ai_lyrics_are_written_and_shown(bot, session, gemini):
+async def test_ai_lyrics_are_written_and_shown(bot, session, ai):
     await bot.start()
     await _fund(session, 25)
     await _order_ai_rock_song(bot)
@@ -78,7 +78,7 @@ async def test_ai_lyrics_are_written_and_shown(bot, session, gemini):
 
     await bot.tap("✅ Создать")
 
-    assert gemini.calls == [("песня про кота", "Рок")]
+    assert ai.calls == [("песня про кота", "Рок")]
     frozen = bot.sent[-2]
     assert frozen.notification == "✍️ Пишу текст песни…" and frozen.buttons == {}
     assert bot.last.text == lyrics_message("Текст 1")
@@ -86,7 +86,7 @@ async def test_ai_lyrics_are_written_and_shown(bot, session, gemini):
     assert await _balance(session) == 25 and await _generations(session) == []
 
 
-async def test_create_song_uses_latest_draft(bot, session, gemini, provider):
+async def test_create_song_uses_latest_draft(bot, session, ai, provider):
     await bot.start()
     await _fund(session, 25)
     await _order_ai_rock_song(bot)
@@ -116,7 +116,7 @@ async def test_create_song_uses_latest_draft(bot, session, gemini, provider):
     )
 
 
-async def test_regenerations_are_capped(bot, session, gemini):
+async def test_regenerations_are_capped(bot, session, ai):
     await bot.start()
     await _fund(session, PRICE)
     await _order_ai_rock_song(bot)
@@ -126,19 +126,19 @@ async def test_regenerations_are_capped(bot, session, gemini):
 
     assert bot.last.text == lyrics_message(f"Текст {LYRICS_DRAFTS_MAX}")
     assert set(bot.last.buttons) == {"✅ Создать песню", "❌ Отмена"}
-    assert len(gemini.calls) == LYRICS_DRAFTS_MAX
+    assert len(ai.calls) == LYRICS_DRAFTS_MAX
 
 
 @pytest.mark.parametrize(
     "bad_draft",
-    [LyricsError("Gemini API error 503: overloaded"), "л" * (LYRICS_MAX + 1)],
+    [LyricsError("OpenRouter API error 503: overloaded"), "л" * (LYRICS_MAX + 1)],
     ids=["api-error", "too-long"],
 )
-async def test_failed_draft_can_be_retried(bot, session, gemini, bad_draft):
+async def test_failed_draft_can_be_retried(bot, session, ai, bad_draft):
     await bot.start()
     await _fund(session, PRICE)
     await _order_ai_rock_song(bot)
-    gemini.drafts.append(bad_draft)
+    ai.drafts.append(bad_draft)
 
     await bot.tap("✅ Создать")
     assert bot.last.text == "😔 Не получилось написать текст. Попробуй ещё раз."
@@ -149,12 +149,12 @@ async def test_failed_draft_can_be_retried(bot, session, gemini, bad_draft):
     assert await _balance(session) == PRICE
 
 
-async def test_failed_redraft_keeps_previous_lyrics(bot, session, gemini, provider):
+async def test_failed_redraft_keeps_previous_lyrics(bot, session, ai, provider):
     await bot.start()
     await _fund(session, PRICE)
     await _order_ai_rock_song(bot)
     await bot.tap("✅ Создать")
-    gemini.drafts.append(LyricsError("timeout"))
+    ai.drafts.append(LyricsError("timeout"))
 
     await bot.tap("🔄 Перегенерировать текст")
     assert bot.last.text.startswith("😔 Не получилось написать новый текст")
@@ -164,7 +164,7 @@ async def test_failed_redraft_keeps_previous_lyrics(bot, session, gemini, provid
     assert provider == [{"lyrics": "Текст 1", "style": "Рок"}]
 
 
-async def test_own_lyrics_skip_gemini(bot, session, gemini, provider):
+async def test_own_lyrics_skip_ai(bot, session, ai, provider):
     await bot.start()
     await _fund(session, 25)
     await bot.tap("🎵 Создать песню")
@@ -173,7 +173,7 @@ async def test_own_lyrics_skip_gemini(bot, session, gemini, provider):
     await bot.text("Куплет\nПрипев")
     await bot.tap("✅ Создать")
 
-    assert gemini.calls == []
+    assert ai.calls == []
     assert bot.last.text.startswith("🎶 Песня создаётся")
     assert provider == [{"lyrics": "Куплет\nПрипев", "style": "Поп"}]
     assert await _balance(session) == 25 - PRICE
@@ -181,17 +181,17 @@ async def test_own_lyrics_skip_gemini(bot, session, gemini, provider):
     assert (generation.mode, generation.lyrics) == ("lyrics", "Куплет\nПрипев")
 
 
-async def test_insufficient_funds_skips_gemini_and_charges_nothing(bot, session, gemini, provider):
+async def test_insufficient_funds_skips_ai_and_charges_nothing(bot, session, ai, provider):
     await bot.start()
     await _order_ai_rock_song(bot)
     await bot.tap("✅ Создать")
 
     assert bot.last.text == f"😔 Недостаточно средств: нужно {PRICE}, на балансе 0."
     assert set(bot.last.buttons) == {"💰 Пополнить", "🏠 В меню"}
-    assert gemini.calls == [] and provider == [] and await _generations(session) == []
+    assert ai.calls == [] and provider == [] and await _generations(session) == []
 
 
-async def test_provider_failure_refunds(bot, session, gemini):
+async def test_provider_failure_refunds(bot, session, ai):
     await bot.start()
     await _fund(session, PRICE)
     await _order_ai_rock_song(bot)
@@ -204,7 +204,7 @@ async def test_provider_failure_refunds(bot, session, gemini):
     assert generation.status == GenerationStatus.FAILED and "NotImplementedError" in generation.error
 
 
-async def test_double_tap_on_create_song_charges_once(bot, session, gemini, provider):
+async def test_double_tap_on_create_song_charges_once(bot, session, ai, provider):
     await bot.start()
     await _fund(session, 100)
     await _order_ai_rock_song(bot)

@@ -30,7 +30,7 @@ from keyboards import (
     style_kb,
 )
 from services import MusicService
-from services.ai import GeminiService
+from services.ai import AIService
 
 logger = logging.getLogger(__name__)
 router = Router(router_id="song")
@@ -39,7 +39,7 @@ STYLE_MAX = 120
 LYRICS_MAX = 3000
 DESCRIPTION_MAX = 500
 PREVIEW_MAX = 300
-LYRICS_DRAFTS_MAX = 5  # Gemini drafts per order: the first one plus 4 regenerations
+LYRICS_DRAFTS_MAX = 5  # AI drafts per order: the first one plus 4 regenerations
 
 MODE_LABELS = {SongMode.LYRICS: "свой текст", SongMode.DESCRIPTION: "текст от ИИ"}
 
@@ -61,7 +61,7 @@ class SongForm(StatesGroup):
     custom_style = State()
     text = State()
     confirm = State()
-    lyrics = State()  # reviewing a Gemini draft
+    lyrics = State()  # reviewing an AI draft
 
 
 def _message_text(event: MessageCreated) -> str:
@@ -117,16 +117,16 @@ async def _send_insufficient_funds(event: MessageCallback, user: User) -> None:
     )
 
 
-async def _draft(event: MessageCallback, gemini: GeminiService, data: dict) -> str | None:
-    """A Gemini draft that fits the lyrics limit, or None if Gemini failed."""
+async def _draft(event: MessageCallback, ai: AIService, data: dict) -> str | None:
+    """An AI draft that fits the lyrics limit, or None if the AI failed."""
     try:
         async with event.typing():
-            lyrics = await gemini.write_lyrics(data["text"], data["style"])
+            lyrics = await ai.write_lyrics(data["text"], data["style"])
     except Exception:
-        logger.exception("Gemini lyrics draft failed")
+        logger.exception("AI lyrics draft failed")
         return None
     if len(lyrics) > LYRICS_MAX:
-        logger.warning("Gemini lyrics draft too long: %d chars", len(lyrics))
+        logger.warning("AI lyrics draft too long: %d chars", len(lyrics))
         return None
     return lyrics
 
@@ -135,13 +135,13 @@ async def _write_lyrics(
     event: MessageCallback,
     context: BaseContext,
     session: AsyncSession,
-    gemini: GeminiService,
+    ai: AIService,
     data: dict,
 ) -> None:
-    await session.commit()  # no DB transaction stays open while Gemini works
+    await session.commit()  # no DB transaction stays open while the AI works
     version = data.get("lyrics_version", 0)
 
-    lyrics = await _draft(event, gemini, data)
+    lyrics = await _draft(event, ai, data)
     if lyrics is None:
         if version:  # the previous draft is still usable
             await event.send(text=REDRAFT_FAILED, attachments=[lyrics_kb(version)])
@@ -279,7 +279,7 @@ async def on_confirm(
     session: AsyncSession,
     db_user: User,
     music: MusicService,
-    gemini: GeminiService,
+    ai: AIService,
 ) -> None:
     data = await context.get_data()
 
@@ -296,7 +296,7 @@ async def on_confirm(
         return
 
     await _freeze(event, notification=WRITING)
-    await _write_lyrics(event, context, session, gemini, data)
+    await _write_lyrics(event, context, session, ai, data)
 
 
 @router.message_callback(SongCallback.filter(F.action == SongAction.REGENERATE), SongForm.lyrics)
@@ -304,7 +304,7 @@ async def on_regenerate(
     event: MessageCallback,
     context: BaseContext,
     session: AsyncSession,
-    gemini: GeminiService,
+    ai: AIService,
     payload: SongCallback,
 ) -> None:
     data = await context.get_data()
@@ -313,7 +313,7 @@ async def on_regenerate(
         return
 
     await _freeze(event, notification=REWRITING)
-    await _write_lyrics(event, context, session, gemini, data)
+    await _write_lyrics(event, context, session, ai, data)
 
 
 @router.message_callback(SongCallback.filter(F.action == SongAction.CREATE), SongForm.lyrics)

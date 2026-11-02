@@ -19,9 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
             "CRITICAL main: Startup failed: Configuration error. Set MAX_BOT_TOKEN",
         ),
         (
-            'async def main():\n    raise ValueError("GEMINI_API_KEY is not set")',
+            'async def main():\n    raise ValueError("OPENROUTER_API_KEY is not set")',
             1,
-            "ValueError: GEMINI_API_KEY is not set",
+            "ValueError: OPENROUTER_API_KEY is not set",
         ),
         ("async def main():\n    pass", 0, "INFO     main: Starting, Python"),
     ],

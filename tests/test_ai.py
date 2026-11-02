@@ -1,32 +1,35 @@
-"""GeminiService against a mocked Gemini HTTP API (real SDK, fake transport)."""
+"""AIService against a mocked OpenRouter HTTP API (real openai SDK, fake transport)."""
 
 import json
 
-import httpx
+import httpx2
 import pytest
-from google.genai import types
 
 from config import Settings
-from services.ai import DEFAULT_MODEL, GeminiService, LyricsError
+from services.ai import AIService, LyricsError
 
 LYRICS = "[Куплет 1]\nКот гуляет по крыше ночной\n\n[Припев]\nМяу, мяу, луна надо мной"
 
 
-def _options(handler) -> types.HttpOptions:
-    return types.HttpOptions(async_client_args={"transport": httpx.MockTransport(handler)})
+def _client(handler) -> httpx2.AsyncClient:
+    return httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
 
 
-def _ok(text: str, finish_reason: str = "STOP") -> httpx.Response:
-    return httpx.Response(
+def _completion(content: str | None, finish_reason: str = "stop") -> httpx2.Response:
+    return httpx2.Response(
         200,
         json={
-            "candidates": [
+            "id": "gen-1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "vendor/model:free",
+            "choices": [
                 {
-                    "content": {"role": "model", "parts": [{"text": text}]},
-                    "finishReason": finish_reason,
                     "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": finish_reason,
                 }
-            ]
+            ],
         },
     )
 
@@ -34,11 +37,11 @@ def _ok(text: str, finish_reason: str = "STOP") -> httpx.Response:
 async def test_write_lyrics_returns_string():
     requests = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
-        return _ok(f"\n{LYRICS}\n")
+        return _completion(f"\n{LYRICS}\n")
 
-    service = GeminiService("test-key", http_options=_options(handler))
+    service = AIService("test-key", model="vendor/model:free", http_client=_client(handler))
     lyrics = await service.write_lyrics("песня про кота", "Рок")
     await service.close()
 
@@ -46,57 +49,63 @@ async def test_write_lyrics_returns_string():
     assert lyrics == LYRICS
 
     [request] = requests
-    assert request.url.path.endswith(f"/models/{DEFAULT_MODEL}:generateContent")
-    assert request.headers["x-goog-api-key"] == "test-key"
+    assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
+    assert request.headers["authorization"] == "Bearer test-key"
     body = json.loads(request.content)
-    assert "lyrics in Russian" in body["systemInstruction"]["parts"][0]["text"]
-    prompt = body["contents"][0]["parts"][0]["text"]
-    assert "Music style: Рок" in prompt and "песня про кота" in prompt
+    assert body["model"] == "vendor/model:free"
+    system, user = body["messages"]
+    assert system["role"] == "system" and "lyrics in Russian" in system["content"]
+    assert user["role"] == "user"
+    assert "Music style: Рок" in user["content"] and "песня про кота" in user["content"]
+
+
+async def test_reasoning_block_is_not_part_of_lyrics():
+    service = AIService(
+        "test-key", http_client=_client(lambda r: _completion(f"<think>rhymes first</think>\n{LYRICS}"))
+    )
+    assert await service.write_lyrics("о море", "Поп") == LYRICS
+    await service.close()
 
 
 @pytest.mark.parametrize(
     ("response", "message"),
     [
         (
-            httpx.Response(
-                400,
-                json={
-                    "error": {
-                        "code": 400,
-                        "message": "User location is not supported for the API use.",
-                        "status": "FAILED_PRECONDITION",
-                    }
-                },
-            ),
-            "User location is not supported",
+            httpx2.Response(401, json={"error": {"message": "No auth credentials found", "code": 401}}),
+            "401",
         ),
-        (httpx.Response(200, json={"promptFeedback": {"blockReason": "SAFETY"}}), "SAFETY"),
-        (_ok("[Куплет 1]\nКот гуля", finish_reason="MAX_TOKENS"), "MAX_TOKENS"),
+        (_completion("[Куплет 1]\nКот гуля", finish_reason="length"), "cut off"),
+        (_completion(None, finish_reason="error"), "no lyrics"),
+        (
+            httpx2.Response(200, json={"id": "gen-1", "object": "chat.completion", "created": 1, "model": "x", "choices": []}),
+            "no lyrics",
+        ),
     ],
-    ids=["api-error", "blocked", "cut-off"],
+    ids=["api-error", "cut-off", "empty", "no-choices"],
 )
 async def test_failures_raise_lyrics_error(response, message):
-    service = GeminiService("test-key", http_options=_options(lambda request: response))
+    service = AIService("test-key", http_client=_client(lambda request: response))
     with pytest.raises(LyricsError, match=message):
         await service.write_lyrics("песня про кота", "Рок")
     await service.close()
 
 
-async def test_api_key_comes_from_gemini_api_key_env(monkeypatch):
-    monkeypatch.setenv("GEMINI_API_KEY", "env-key")
-    keys = []
+async def test_key_and_model_come_from_env(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "env-key")
+    monkeypatch.setenv("OPENROUTER_MODEL", "vendor/model:free")
+    seen = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        keys.append(request.headers["x-goog-api-key"])
-        return _ok(LYRICS)
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append((request.headers["authorization"], json.loads(request.content)["model"]))
+        return _completion(LYRICS)
 
-    service = GeminiService.from_settings(Settings(_env_file=None), http_options=_options(handler))
+    service = AIService.from_settings(Settings(_env_file=None), http_client=_client(handler))
     assert await service.write_lyrics("о море", "Поп") == LYRICS
     await service.close()
-    assert keys == ["env-key"]
+    assert seen == [("Bearer env-key", "vendor/model:free")]
 
 
-def test_missing_gemini_api_key_is_rejected(monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
-        GeminiService.from_settings(Settings(_env_file=None))
+def test_missing_openrouter_api_key_is_rejected(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+        AIService.from_settings(Settings(_env_file=None))
