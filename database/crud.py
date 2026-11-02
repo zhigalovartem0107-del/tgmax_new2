@@ -5,6 +5,7 @@ from datetime import timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from database.models import Generation, GenerationStatus, Payment, PaymentStatus, User, utcnow
 
@@ -99,13 +100,36 @@ async def start_paid_generation(
     return generation
 
 
-async def fail_generation(session: AsyncSession, generation: Generation, error: str) -> None:
-    """Mark the job as failed and refund its cost. Safe to call more than once."""
-    if generation.status == GenerationStatus.FAILED:
-        return
-    generation.status = GenerationStatus.FAILED
-    generation.error = error[:1000]
-    await add_balance(session, generation.user_id, generation.cost)
+async def fail_generation(session: AsyncSession, generation: Generation, error: str) -> bool:
+    """Mark the job as failed and refund its cost — exactly once. The handler and the delivery worker may try
+    at the same time, each with its own session, so the check, the status flip and the refund are one guarded
+    UPDATE, not a check of the in-memory object. False if it was already finished (failed or delivered)."""
+    row = (
+        await session.execute(
+            update(Generation)
+            .where(Generation.id == generation.id,
+                   Generation.status.in_([GenerationStatus.PENDING, GenerationStatus.PROCESSING]))
+            .values(status=GenerationStatus.FAILED, error=error[:1000])
+            .returning(Generation.user_id, Generation.cost)
+        )
+    ).first()
+    if row is None:
+        return False
+    set_committed_value(generation, "status", GenerationStatus.FAILED)
+    set_committed_value(generation, "error", error[:1000])
+    await add_balance(session, row.user_id, row.cost)
+    return True
+
+
+async def mark_processing(session: AsyncSession, generation_id: int, task_id: str) -> bool:
+    """Pending -> processing with the provider's task id. False if the job was refunded meanwhile (the worker
+    gave up on a slow submit): then the late result must be ignored, not delivered for free."""
+    result = await session.execute(
+        update(Generation)
+        .where(Generation.id == generation_id, Generation.status == GenerationStatus.PENDING)
+        .values(status=GenerationStatus.PROCESSING, provider_task_id=task_id)
+    )
+    return result.rowcount == 1
 
 
 async def get_stats(session: AsyncSession) -> Stats:

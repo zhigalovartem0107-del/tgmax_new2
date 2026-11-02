@@ -191,8 +191,10 @@ async def _submit_song(
         await event.send(text=SUBMIT_FAILED, attachments=[main_menu_kb()])
         return
 
-    generation.status = GenerationStatus.PROCESSING
-    generation.provider_task_id = task_id
+    if not await crud.mark_processing(session, generation.id, task_id):
+        await session.commit()
+        logger.warning("Generation %s: refunded while the provider was accepting it; result ignored", generation.id)
+        return
     await session.commit()
     await event.send(text=SUBMITTED, attachments=[main_menu_kb()])
 

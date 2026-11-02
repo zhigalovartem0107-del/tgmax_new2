@@ -68,6 +68,8 @@ async def _check_song(
 ) -> None:
     async with session_factory() as session:
         song = await session.get(Generation, song_id)
+        if song is None:  # deleted with its user meanwhile
+            return
         age = utcnow() - song.created_at
 
         if song.status == GenerationStatus.PENDING:
@@ -108,8 +110,10 @@ async def _send_song(bot: Bot, music: MusicService, song: Generation, audio_url:
 
 
 async def _refund(bot: Bot, session: AsyncSession, song: Generation, error: str) -> None:
-    await crud.fail_generation(session, song, error)
+    refunded = await crud.fail_generation(session, song, error)
     await session.commit()  # the refund is stored before the user is told
+    if not refunded:  # already refunded (by the handler) or delivered: nothing to tell
+        return
     logger.warning("Song %s refunded: %s", song.id, error)
     try:
         await bot.send_message(user_id=song.user_id, text=SONG_FAILED)

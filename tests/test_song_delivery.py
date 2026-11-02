@@ -142,3 +142,18 @@ async def test_delivery_loop_survives_a_failing_pass(monkeypatch):
         await asyncio.sleep(0)
     loop.cancel()
     assert len(passes) >= 3
+
+
+async def test_worker_refund_after_handler_refund_does_not_message_twice(bot, session):
+    from database import crud as _crud
+    from database.models import GenerationKind
+    from workers.song_delivery import SONG_FAILED, _refund
+
+    await _crud.get_or_create_user(session, 4242, "R")
+    await _crud.add_balance(session, 4242, 10)
+    gen = await _crud.start_paid_generation(session, 4242, GenerationKind.SONG, prompt="p", cost=10)
+    await session.commit()
+    await _refund(bot.bot, session, gen, "provider error")
+    await _refund(bot.bot, session, gen, "timed out")
+    assert [s.text for s in bot.sent].count(SONG_FAILED) == 1
+    assert (await _crud.get_user(session, 4242)).balance == 10
