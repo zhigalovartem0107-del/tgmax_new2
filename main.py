@@ -1,92 +1,51 @@
-"""Entry point: python main.py"""
+"""Entry point: python main.py
+
+Logs go to the console and to data/bot.log. data/ is the folder the host keeps
+between deploys, so when the host's log viewer shows nothing, open that file in
+its file manager. The bot is imported only after logging is set up, so even a
+configuration error raised on import is written to the file.
+"""
 
 import asyncio
-import contextlib
 import logging
-import signal
+import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
-from maxapi import Bot, Dispatcher
-from maxapi.context import SimpleEventIsolation
+LOG_FILE = Path(__file__).resolve().parent / "data" / "bot.log"
+LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 
-from config import settings
-from database import close_db, init_db, session_factory
-from handlers import BOT_COMMANDS, get_routers
-from middlewares import DbSessionMiddleware, ServicesMiddleware, UserMiddleware
-from services import MusicService
-from services.ai import GeminiService
-
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("main")
 
 
-def _secret(value) -> str | None:
-    return value.get_secret_value() if value else None
-
-
-def build_dispatcher(gemini: GeminiService) -> Dispatcher:
-    music = MusicService(settings.music_api_url, _secret(settings.music_api_key))
-
-    # Updates from different users run concurrently (a Gemini call takes seconds);
-    # updates from one user stay in order, so their FSM steps never race.
-    dp = Dispatcher(use_create_task=True, event_isolation=SimpleEventIsolation())
-    # Inner middlewares run in registration order, only for updates some handler accepts.
-    dp.register_inner_middleware(DbSessionMiddleware(session_factory))
-    dp.register_inner_middleware(UserMiddleware())
-    dp.register_inner_middleware(ServicesMiddleware(music=music, gemini=gemini))
-    dp.include_routers(*get_routers())
-    return dp
-
-
-async def sync_commands(bot: Bot) -> None:
-    """Replace the bot's "/" menu in MAX. The list is stored on MAX's side until replaced,
-    so without this it keeps showing whatever an earlier bot version set."""
+def setup_logging() -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
     try:
-        result = await bot.set_commands(*BOT_COMMANDS)
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(
+            RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
+        )
+    except OSError as exc:  # read-only disk: keep console logging
+        print(f"Cannot write {LOG_FILE}: {exc}", file=sys.stderr)
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, handlers=handlers)
+
+
+def run() -> None:
+    setup_logging()
+    logger.info("Starting, Python %s", sys.version.split()[0])
+    try:
+        import app  # after logging setup: configuration errors are raised on import
+
+        asyncio.run(app.main())
+    except SystemExit as exc:
+        if exc.code in (None, 0):
+            raise
+        logger.critical("Startup failed: %s", exc.code)
+        sys.exit(1)
     except Exception:
-        logger.exception("Could not update the bot command menu")
-        return
-    names = ", ".join(f"/{command.name}" for command in result.commands or [])
-    logger.info("Bot command menu on MAX: %s", names or "(empty)")
-
-
-def install_stop_signals(dp: Dispatcher) -> set[asyncio.Task]:
-    """Stop polling cleanly on Ctrl+C or when the host sends SIGTERM."""
-    loop = asyncio.get_running_loop()
-    tasks: set[asyncio.Task] = set()
-
-    def request_stop() -> None:
-        logger.info("Stop signal received, shutting down")
-        tasks.add(loop.create_task(dp.stop_polling()))
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        with contextlib.suppress(NotImplementedError):  # not supported on Windows
-            loop.add_signal_handler(sig, request_stop)
-    return tasks
-
-
-async def main() -> None:
-    logging.basicConfig(
-        level=settings.log_level.upper(),
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-    )
-    gemini = GeminiService.from_settings(settings)
-    await init_db()
-
-    bot = Bot(token=settings.bot_token.get_secret_value())
-    await sync_commands(bot)
-    dp = build_dispatcher(gemini)
-    stop_tasks = install_stop_signals(dp)
-
-    logger.info("Bot is starting")
-    try:
-        await dp.start_polling(bot)
-    finally:
-        if stop_tasks:
-            await asyncio.gather(*stop_tasks, return_exceptions=True)
-        await bot.close_session()
-        await gemini.close()
-        await close_db()
-        logger.info("Bot stopped")
+        logger.critical("Bot crashed", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run()

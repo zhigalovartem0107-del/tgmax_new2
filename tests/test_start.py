@@ -4,7 +4,7 @@ from maxapi.connection.base import BaseConnection
 from maxapi.enums.http_method import HTTPMethod
 from maxapi.methods.types.setted_commands import SettedCommands
 
-import main
+import app
 from database import crud
 from handlers.start import BOT_COMMANDS, HELP_TEXT
 
@@ -40,7 +40,7 @@ async def test_sync_commands_replaces_menu_on_max(monkeypatch):
         return SettedCommands(commands=BOT_COMMANDS)
 
     monkeypatch.setattr(BaseConnection, "request", request)
-    await main.sync_commands(Bot(token="test-token"))
+    await app.sync_commands(Bot(token="test-token"))
 
     assert requests == [
         (
@@ -62,7 +62,7 @@ async def test_sync_commands_failure_does_not_stop_the_bot(monkeypatch, caplog):
         raise RuntimeError("MAX is down")
 
     monkeypatch.setattr(BaseConnection, "request", request)
-    await main.sync_commands(Bot(token="test-token"))  # must not raise
+    await app.sync_commands(Bot(token="test-token"))  # must not raise
     assert "Could not update the bot command menu" in caplog.text
 
 

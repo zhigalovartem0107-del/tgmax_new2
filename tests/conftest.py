@@ -18,7 +18,7 @@ from maxapi import Bot  # noqa: E402
 from maxapi.methods.types.getted_updates import process_update_request  # noqa: E402
 from maxapi.types import User as MaxUser  # noqa: E402
 
-import main  # noqa: E402
+import app  # noqa: E402
 from config import settings  # noqa: E402
 from database import Base, close_db, engine, session_factory  # noqa: E402
 from services.ai import GeminiService  # noqa: E402
@@ -145,7 +145,7 @@ async def bot(monkeypatch) -> BotHarness:
 
     max_bot = Bot(token="test-token", auto_requests=False)
     gemini = GeminiService.from_settings(settings)
-    dp = main.build_dispatcher(gemini)
+    dp = app.build_dispatcher(gemini)
     await dp.startup(max_bot)  # same preparation start_polling does
     yield BotHarness(max_bot, dp, sent)
     await max_bot.close_session()

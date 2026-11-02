@@ -13,6 +13,8 @@ python main.py
 ```
 
 Data is stored in `data/bot.db` (SQLite) unless `DATABASE_URL` points to PostgreSQL.
+Logs, including startup errors, are also written to `data/bot.log`: open it in the
+host's file manager when the host's log viewer shows nothing.
 
 ## Tests
 
@@ -24,7 +26,8 @@ pytest
 ## Layout
 
 ```
-main.py            entry point: DB init, middlewares, routers, polling
+main.py            entry point: logging (console + data/bot.log), then starts app
+app.py             the bot: dispatcher, services, command menu, polling
 config.py          settings from environment / .env
 database/
   engine.py        async engine, session factory, init_db()
