@@ -16,6 +16,14 @@ Data is stored in `data/bot.db` (SQLite) unless `DATABASE_URL` points to Postgre
 Logs, including startup errors, are also written to `data/bot.log`: open it in the
 host's file manager when the host's log viewer shows nothing.
 
+## Admin commands
+
+Only for MAX user ids listed in `ADMIN_IDS` (comma-separated). To find your id,
+send `/admin` to the bot: without access it replies with your id.
+
+- `/admin`: users, generations and balance totals
+- `/add_balance <amount>` (or `/add_credits`): top up your own balance
+
 ## Tests
 
 ```bash
@@ -39,6 +47,7 @@ middlewares/
   services.py      passes service clients to handlers (music, ...)
 handlers/
   start.py         /start, /cancel, Start button, main menu, help
+  admin.py         /admin stats, /add_balance (ADMIN_IDS only)
   payments.py      balance, top-ups, subscriptions
   song.py          song FSM: mode → style → text → confirm → AI lyrics → charge → submit
   video.py         video generation flow

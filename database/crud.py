@@ -1,9 +1,21 @@
 """Database operations. Handlers call these instead of building queries themselves."""
 
-from sqlalchemy import update
+from dataclasses import dataclass
+from datetime import timedelta
+
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import Generation, GenerationStatus, User
+from database.models import Generation, GenerationStatus, User, utcnow
+
+
+@dataclass(frozen=True)
+class Stats:
+    users: int
+    new_users_24h: int
+    generations_by_status: dict[str, int]
+    spent: int  # cost of generations that were not refunded
+    balances: int  # sum of all users' balances
 
 
 async def get_user(session: AsyncSession, user_id: int) -> User | None:
@@ -94,3 +106,28 @@ async def fail_generation(session: AsyncSession, generation: Generation, error: 
     generation.status = GenerationStatus.FAILED
     generation.error = error[:1000]
     await add_balance(session, generation.user_id, generation.cost)
+
+
+async def get_stats(session: AsyncSession) -> Stats:
+    users = await session.scalar(select(func.count()).select_from(User))
+    new_users = await session.scalar(
+        select(func.count())
+        .select_from(User)
+        .where(User.created_at >= utcnow() - timedelta(days=1))
+    )
+    rows = await session.execute(
+        select(Generation.status, func.count()).group_by(Generation.status)
+    )
+    spent = await session.scalar(
+        select(func.coalesce(func.sum(Generation.cost), 0)).where(
+            Generation.status != GenerationStatus.FAILED
+        )
+    )
+    balances = await session.scalar(select(func.coalesce(func.sum(User.balance), 0)))
+    return Stats(
+        users=users,
+        new_users_24h=new_users,
+        generations_by_status=dict(rows.all()),
+        spent=spent,
+        balances=balances,
+    )
