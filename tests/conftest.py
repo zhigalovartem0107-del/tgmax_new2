@@ -22,6 +22,7 @@ import app  # noqa: E402
 from config import settings  # noqa: E402
 from database import Base, close_db, engine, session_factory  # noqa: E402
 from services.ai import AIService  # noqa: E402
+from services.music import MusicService  # noqa: E402
 
 USER_ID = 777
 CHAT_ID = 555
@@ -49,6 +50,7 @@ class Sent:
     text: str | None
     attachments: list | None
     notification: str | None = None
+    user_id: int | None = None  # recipient of a send_message(user_id=...)
 
     @property
     def buttons(self) -> dict[str, str]:
@@ -121,7 +123,7 @@ async def bot(monkeypatch) -> BotHarness:
     sent: list[Sent] = []
 
     async def send_message(self, chat_id=None, user_id=None, text=None, attachments=None, *a, **kw):
-        sent.append(Sent(text, attachments))
+        sent.append(Sent(text, attachments, user_id=user_id))
 
     async def send_callback(self, callback_id, message=None, notification=None, *a, **kw):
         sent.append(
@@ -145,8 +147,10 @@ async def bot(monkeypatch) -> BotHarness:
 
     max_bot = Bot(token="test-token", auto_requests=False)
     ai = AIService.from_settings(settings)
-    dp = app.build_dispatcher(ai)
+    music = MusicService(None, None)
+    dp = app.build_dispatcher(ai, music)
     await dp.startup(max_bot)  # same preparation start_polling does
     yield BotHarness(max_bot, dp, sent)
     await max_bot.close_session()
     await ai.close()
+    await music.close()

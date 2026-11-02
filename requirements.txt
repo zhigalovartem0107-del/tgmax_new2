@@ -4,3 +4,4 @@ aiosqlite==0.22.1
 asyncpg==0.32.0
 pydantic-settings==2.16.2
 openai==3.42.1
+httpx2==2.16.0

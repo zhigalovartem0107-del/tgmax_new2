@@ -57,9 +57,11 @@ keyboards/
   song.py          song flow buttons and styles
 services/
   ai.py            OpenRouter client that writes the lyrics
-  music.py         song generation API client
+  music.py         ACE-Step music server client
   video.py         video generation API client
   yookassa.py      YooKassa payments client
+workers/
+  song_delivery.py sends finished songs, refunds failed or stuck orders
 tests/             pytest suite (real dispatcher, stubbed HTTP)
 ```
 

@@ -14,6 +14,7 @@ from handlers import BOT_COMMANDS, get_routers
 from middlewares import DbSessionMiddleware, ServicesMiddleware, UserMiddleware
 from services import MusicService
 from services.ai import AIService
+from workers.song_delivery import run_song_delivery
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +23,7 @@ def _secret(value) -> str | None:
     return value.get_secret_value() if value else None
 
 
-def build_dispatcher(ai: AIService) -> Dispatcher:
-    music = MusicService(settings.music_api_url, _secret(settings.music_api_key))
-
+def build_dispatcher(ai: AIService, music: MusicService) -> Dispatcher:
     # Updates from different users run concurrently (an AI call takes seconds);
     # updates from one user stay in order, so their FSM steps never race.
     dp = Dispatcher(use_create_task=True, event_isolation=SimpleEventIsolation())
@@ -66,12 +65,16 @@ def install_stop_signals(dp: Dispatcher) -> set[asyncio.Task]:
 async def main() -> None:
     logging.getLogger().setLevel(settings.log_level.upper())
     ai = AIService.from_settings(settings)
+    music = MusicService(settings.music_api_url, _secret(settings.music_api_key))
+    if not settings.music_api_url:
+        logger.warning("MUSIC_API_URL is not set: song orders will fail and be refunded")
     await init_db()
 
     bot = Bot(token=settings.bot_token.get_secret_value())
     await sync_commands(bot)
-    dp = build_dispatcher(ai)
+    dp = build_dispatcher(ai, music)
     stop_tasks = install_stop_signals(dp)
+    delivery = asyncio.create_task(run_song_delivery(bot, music, session_factory))
 
     logger.info("Bot is starting")
     try:
@@ -79,7 +82,11 @@ async def main() -> None:
     finally:
         if stop_tasks:
             await asyncio.gather(*stop_tasks, return_exceptions=True)
+        delivery.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await delivery
         await bot.close_session()
         await ai.close()
+        await music.close()
         await close_db()
         logger.info("Bot stopped")
