@@ -5,11 +5,22 @@ Calls the REST API (https://api.yookassa.ru/v3) through aiohttp: the official
 """
 
 import base64
+import logging
+import re
 import uuid
 
 import aiohttp
 
 API_URL = "https://api.yookassa.ru"
+logger = logging.getLogger(__name__)
+
+# What copy-paste into a hosting panel adds invisibly: spaces, newlines, quotes, zero-width characters, BOM.
+# A real shopId (digits) and secret key (live_/test_ + letters, digits, _ -) never contain any of these.
+_HIDDEN = re.compile(r"[\s\"'«»`\u200b-\u200f\u2060\ufeff]")
+
+
+def _clean(value: str | None) -> str | None:
+    return _HIDDEN.sub("", value) if value else value
 
 
 class YooKassaError(Exception):
@@ -30,8 +41,10 @@ class YooKassaService:
         base_url: str = API_URL,
         return_url: str = "https://max.ru",
     ) -> None:
-        self.shop_id = shop_id
-        self.secret_key = secret_key
+        self.shop_id = _clean(shop_id)
+        self.secret_key = _clean(secret_key)
+        # How many invisible characters were cut from each setting — shown in the 401 diagnostics.
+        self._removed = (len(shop_id or "") - len(self.shop_id or ""), len(secret_key or "") - len(self.secret_key or ""))
         self.receipt_email = receipt_email
         self.base_url = base_url
         self.return_url = return_url
@@ -58,9 +71,23 @@ class YooKassaService:
     async def _request(self, method: str, path: str, **kwargs) -> dict:
         async with self._http().request(method, self.base_url + path, **kwargs) as response:
             text = await response.text()
+            if response.status == 401:
+                self._log_auth_failure()
             if response.status >= 300:
                 raise YooKassaError(response.status, text)
             return await response.json(content_type=None)
+
+    def _log_auth_failure(self) -> None:
+        """What exactly was sent, without revealing the key: compare with the YooKassa dashboard
+        (Integration → API keys: shopId, and the key's beginning and last characters)."""
+        key = self.secret_key or ""
+        kind = "live_" if key.startswith("live_") else "test_" if key.startswith("test_") else "neither live_ nor test_"
+        logger.error(
+            "YooKassa 401 invalid credentials: shopId=%r%s (removed %d hidden characters from YOOKASSA_SHOP_ID); "
+            "secret key: %s, length %d, ends with …%s (removed %d hidden characters from YOOKASSA_SECRET_KEY)",
+            self.shop_id, "" if (self.shop_id or "").isdigit() else " — NOT digits only, check YOOKASSA_SHOP_ID",
+            self._removed[0], kind, len(key), key[-4:], self._removed[1],
+        )
 
     async def create_payment(
         self, amount_kopecks: int, description: str, email: str | None = None, metadata: dict | None = None

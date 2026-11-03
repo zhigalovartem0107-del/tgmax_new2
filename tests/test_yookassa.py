@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 
 import pytest
 from aiohttp import web
@@ -83,3 +84,52 @@ async def test_get_status(fake_yookassa):
 def test_not_configured():
     assert not YooKassaService(None, None).configured
     assert YooKassaService("1", "k").configured
+
+
+HEADER = "Basic MTUwNzg4MzpsaXZlX1RFU1RLRVlfNDg="          # base64("1507883:live_TESTKEY_48"), fixed literal
+
+
+async def _sent_auth(shop_id, secret) -> str:
+    seen = {}
+
+    async def create(request: web.Request) -> web.Response:
+        seen["auth"] = request.headers.get("Authorization")
+        return web.json_response({"id": "p", "confirmation": {"confirmation_url": "u"}})
+
+    app = web.Application()
+    app.router.add_post("/v3/payments", create)
+    server = TestServer(app)
+    await server.start_server()
+    service = YooKassaService(shop_id, secret, base_url=str(server.make_url("")).rstrip("/"))
+    try:
+        await service.create_payment(100, "x")
+    finally:
+        await service.close()
+        await server.close()
+    return seen["auth"]
+
+
+async def test_exact_basic_auth_header():
+    assert await _sent_auth("1507883", "live_TESTKEY_48") == HEADER
+
+
+@pytest.mark.parametrize("shop_id, secret", [
+    ("1507883\n", "live_TESTKEY_48\n"),                       # newline at the end (copy-paste)
+    (' "1507883" ', '"live_TESTKEY_48"'),                      # quotes typed into the hosting panel
+    ("﻿1507883", "live_TESTKEY_48​"),                # invisible BOM / zero-width space
+    ("1507883\r\n", "\tlive_TESTKEY_48 "),
+])
+async def test_hidden_characters_do_not_reach_the_header(shop_id, secret):
+    assert await _sent_auth(shop_id, secret) == HEADER
+
+
+async def test_401_logs_shop_id_and_key_length_not_the_key(fake_yookassa, caplog):
+    service, _, state = fake_yookassa
+    service = YooKassaService("1507883", "live_TESTKEY_48\n", base_url=service.base_url)
+    state["fail"] = {"type": "error", "code": "invalid_credentials"}
+    with caplog.at_level(logging.ERROR), pytest.raises(YooKassaError):
+        await service.create_payment(100, "x")
+    await service.close()
+    assert "shopId='1507883'" in caplog.text and "length 15" in caplog.text and "live_" in caplog.text
+    assert "removed 1 hidden" in caplog.text                  # says the setting had junk in it
+    assert "TESTKEY" not in caplog.text                       # never the key itself
