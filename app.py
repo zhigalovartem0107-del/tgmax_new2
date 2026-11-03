@@ -21,10 +21,6 @@ from workers.song_delivery import run_song_delivery
 logger = logging.getLogger(__name__)
 
 
-def _secret(value) -> str | None:
-    return value.get_secret_value() if value else None
-
-
 def build_dispatcher(ai: AIService, music: MusicService, yookassa: YooKassaService | None = None) -> Dispatcher:
     # Updates from different users run concurrently (an AI call takes seconds);
     # updates from one user stay in order, so their FSM steps never race.
@@ -67,9 +63,9 @@ def install_stop_signals(dp: Dispatcher) -> set[asyncio.Task]:
 async def main() -> None:
     logging.getLogger().setLevel(settings.log_level.upper())
     ai = AIService.from_settings(settings)
-    music = MusicService(settings.music_api_url, _secret(settings.music_api_key))
-    if not settings.music_api_url:
-        logger.warning("MUSIC_API_URL is not set: song orders will fail and be refunded")
+    music = MusicService.from_settings(settings)
+    if settings.music_api_key is None:
+        logger.warning("MUSIC_API_KEY is not set: song orders will fail and be refunded")
     await init_db()
 
     bot = Bot(token=settings.bot_token.get_secret_value())

@@ -196,12 +196,12 @@ async def test_provider_failure_refunds(bot, session, ai):
     await _fund(session, PRICE)
     await _order_ai_rock_song(bot)
     await bot.tap("✅ Создать")
-    await bot.tap("✅ Создать песню")  # no MUSIC_API_URL in tests -> MusicError
+    await bot.tap("✅ Создать песню")  # no MUSIC_API_KEY in tests -> MusicError
 
     assert "Средства вернулись на баланс" in bot.last.text
     assert await _balance(session) == PRICE
     [generation] = await _generations(session)
-    assert generation.status == GenerationStatus.FAILED and "MUSIC_API_URL" in generation.error
+    assert generation.status == GenerationStatus.FAILED and "MUSIC_API_KEY" in generation.error
 
 
 async def test_double_tap_on_create_song_charges_once(bot, session, ai, provider):

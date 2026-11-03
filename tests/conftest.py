@@ -179,7 +179,7 @@ async def bot(monkeypatch) -> BotHarness:
 
     max_bot = Bot(token="test-token", auto_requests=False)
     ai = AIService.from_settings(settings)
-    music = MusicService(None, None)
+    music = MusicService(None)
     yookassa = FakeYooKassa()
     dp = app.build_dispatcher(ai, music, yookassa)
     await dp.startup(max_bot)  # same preparation start_polling does

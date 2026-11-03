@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from database import crud
 from database.models import Generation, GenerationKind, GenerationStatus, utcnow
-from services.music import MusicError, MusicService, MusicStatus
+from services.music import MusicError, MusicService, MusicStatus, audio_filename
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,9 @@ async def _send_song(bot: Bot, music: MusicService, song: Generation, audio_url:
         await bot.send_message(
             user_id=song.user_id,
             text=SONG_READY,
-            attachments=[InputMediaBuffer(audio, filename="song.mp3", type=UploadType.AUDIO)],
+            attachments=[
+                InputMediaBuffer(audio, filename=audio_filename(audio_url), type=UploadType.AUDIO)
+            ],
         )
     except Exception:
         logger.exception("Song %s: delivery failed, will retry", song.id)

@@ -13,7 +13,7 @@ from database import Generation, GenerationKind, GenerationStatus, crud, session
 from database.models import utcnow
 from services.music import MusicError, MusicResult, MusicStatus
 
-AUDIO_URL = "https://ace.example.com/v1/audio?path=song.mp3"
+AUDIO_URL = "https://v3.fal.media/files/rabbit/abc123/song.wav"
 
 
 class FakeMusic:
@@ -29,7 +29,7 @@ class FakeMusic:
 
     async def download(self, audio_url):
         assert audio_url == AUDIO_URL
-        return b"ID3 song"
+        return b"RIFF song"
 
 
 async def _paid_song(session, status=GenerationStatus.PROCESSING, age=timedelta(0)) -> int:
@@ -60,7 +60,7 @@ async def test_finished_song_is_sent_to_its_owner_as_audio(bot, session):
     [message] = bot.sent
     assert message.user_id == USER_ID
     [audio] = [a for a in message.attachments if isinstance(a, InputMediaBuffer)]
-    assert (audio.buffer, audio.type) == (b"ID3 song", UploadType.AUDIO)
+    assert (audio.buffer, audio.type, audio.filename) == (b"RIFF song", UploadType.AUDIO, "song.wav")
     assert await _state(session, song_id) == (GenerationStatus.DONE, 0)
 
 
