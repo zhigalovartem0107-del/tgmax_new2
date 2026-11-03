@@ -18,6 +18,7 @@ os.environ["SHOP_PACKAGES"] = "5:199,15:499"
 
 import pytest  # noqa: E402
 from maxapi import Bot  # noqa: E402
+from maxapi.methods.types.deleted_message import DeletedMessage  # noqa: E402
 from maxapi.methods.types.getted_updates import process_update_request  # noqa: E402
 from maxapi.types import User as MaxUser  # noqa: E402
 
@@ -25,6 +26,7 @@ import app  # noqa: E402
 from config import settings  # noqa: E402
 from database import Base, close_db, engine, session_factory  # noqa: E402
 from services.ai import AIService  # noqa: E402
+from services.keys import ApiKeys  # noqa: E402
 from services.music import MusicService  # noqa: E402
 
 USER_ID = 777
@@ -98,6 +100,9 @@ class FakeYooKassa:
 class BotHarness:
     def __init__(self, bot: Bot, dp, sent: list[Sent], yookassa: FakeYooKassa) -> None:
         self.bot, self.dp, self.sent, self.yookassa = bot, dp, sent, yookassa
+        self.deleted: list[str] = []  # message ids the bot deleted
+        self.keys: ApiKeys | None = None
+        self.music_key = lambda: None  # the key the running MusicService would send now
         self._ids = itertools.count(1)
 
     @property
@@ -172,18 +177,29 @@ async def bot(monkeypatch) -> BotHarness:
     async def get_me(self):
         return MaxUser(user_id=1, first_name="Bot", username="bot", is_bot=True, last_activity_time=0)
 
+    deleted: list[str] = []
+
+    async def delete_message(self, message_id, *a, **kw):
+        deleted.append(message_id)
+        return DeletedMessage(success=True)
+
     monkeypatch.setattr(Bot, "send_message", send_message)
     monkeypatch.setattr(Bot, "send_callback", send_callback)
     monkeypatch.setattr(Bot, "send_action", send_action)
     monkeypatch.setattr(Bot, "get_me", get_me)
+    monkeypatch.setattr(Bot, "delete_message", delete_message)
 
     max_bot = Bot(token="test-token", auto_requests=False)
     ai = AIService.from_settings(settings)
-    music = MusicService(None)
+    keys = ApiKeys(session_factory, settings)
+    await keys.load()
+    music = MusicService(keys.getter("ACEMUSIC_API_KEY"))
     yookassa = FakeYooKassa()
-    dp = app.build_dispatcher(ai, music, yookassa)
+    dp = app.build_dispatcher(ai, music, yookassa, keys)
     await dp.startup(max_bot)  # same preparation start_polling does
-    yield BotHarness(max_bot, dp, sent, yookassa)
+    harness = BotHarness(max_bot, dp, sent, yookassa)
+    harness.deleted, harness.keys, harness.music_key = deleted, keys, music._key
+    yield harness
     await max_bot.close_session()
     await ai.close()
     await music.close()

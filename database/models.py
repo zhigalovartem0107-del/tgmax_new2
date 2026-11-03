@@ -165,3 +165,17 @@ class Generation(Base):
 
     def __repr__(self) -> str:
         return f"Generation(id={self.id}, kind={self.kind}, status={self.status})"
+
+
+class ApiKey(Base):
+    """An API key an admin set in the bot. It wins over the environment variable of the same name."""
+
+    __tablename__ = "api_keys"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)  # e.g. ACEMUSIC_API_KEY
+    value: Mapped[str] = mapped_column(Text)
+    updated_by: Mapped[int | None] = mapped_column(BigInteger)  # the admin's MAX user id
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+    def __repr__(self) -> str:  # never shows the value
+        return f"ApiKey(name={self.name!r})"

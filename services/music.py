@@ -19,6 +19,7 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath
@@ -83,7 +84,7 @@ class _Job:
 class MusicService:
     def __init__(
         self,
-        api_key: str | None,
+        api_key: str | Callable[[], str | None] | None,  # a key, or where to read the current one
         model: str | None = None,  # None: the first model GET /v1/models lists
         duration: int = DEFAULT_DURATION,
         http_client: httpx2.AsyncClient | None = None,
@@ -92,16 +93,19 @@ class MusicService:
         self.model = model
         self.duration = duration
         self.base_url = base_url.rstrip("/")
-        self._auth = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._key = api_key if callable(api_key) else (lambda: api_key)
         # 60 s between bytes is plenty: the stream carries a heartbeat every 2 s.
         self._http = http_client or httpx2.AsyncClient(timeout=60.0)
         self._jobs: dict[str, _Job] = {}
 
     @classmethod
-    def from_settings(cls, cfg: Settings, **kwargs) -> "MusicService":
-        """Build from ACEMUSIC_API_KEY (or MUSIC_API_KEY), MUSIC_MODEL and MUSIC_DURATION."""
+    def from_settings(cls, cfg: Settings, keys=None, **kwargs) -> "MusicService":
+        """Build from MUSIC_MODEL and MUSIC_DURATION; the key is ACEMUSIC_API_KEY (or MUSIC_API_KEY),
+        read on every request from `keys` (services.keys.ApiKeys) when given, so a key saved
+        in the bot is used at once."""
         return cls(
-            cfg.music_api_key.get_secret_value() if cfg.music_api_key else None,
+            keys.getter("ACEMUSIC_API_KEY") if keys is not None
+            else (cfg.music_api_key.get_secret_value() if cfg.music_api_key else None),
             model=cfg.music_model,
             duration=cfg.music_duration or DEFAULT_DURATION,
             **kwargs,
@@ -109,7 +113,7 @@ class MusicService:
 
     async def generate_song(self, lyrics: str, style: str) -> str:
         """Start generating in the background and return the job id right away."""
-        if not self._auth:
+        if not self._auth():
             raise MusicError("ACEMUSIC_API_KEY is not set")
         self._forget_old_jobs()
         task_id = uuid.uuid4().hex
@@ -160,7 +164,7 @@ class MusicService:
                     "audio_config": {"format": "mp3", "vocal_language": "ru", "duration": self.duration},
                 }
                 async with self._http.stream(
-                    "POST", f"{self.base_url}/v1/chat/completions", json=payload, headers=self._auth
+                    "POST", f"{self.base_url}/v1/chat/completions", json=payload, headers=self._auth()
                 ) as response:
                     if response.status_code != 200:
                         await response.aread()
@@ -192,11 +196,15 @@ class MusicService:
         return model
 
     async def _request(self, method: str, url: str, **kwargs) -> httpx2.Response:
-        headers = self._auth if url.startswith(self.base_url + "/") else {}  # the key goes only to the API
+        headers = self._auth() if url.startswith(self.base_url + "/") else {}  # the key goes only to the API
         try:
             return await self._http.request(method, url, headers=headers, **kwargs)
         except httpx2.HTTPError as exc:
             raise MusicError(f"acemusic unreachable: {exc}") from exc
+
+    def _auth(self) -> dict[str, str]:
+        key = self._key()
+        return {"Authorization": f"Bearer {key}"} if key else {}
 
     def _forget_old_jobs(self) -> None:
         now = time.monotonic()

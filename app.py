@@ -14,6 +14,7 @@ from handlers import BOT_COMMANDS, get_routers
 from middlewares import DbSessionMiddleware, ServicesMiddleware, UserMiddleware
 from services import MusicService
 from services.ai import AIService
+from services.keys import ApiKeys
 from services.yookassa import YooKassaService
 from workers.payments import run_payment_worker
 from workers.song_delivery import run_song_delivery
@@ -21,14 +22,19 @@ from workers.song_delivery import run_song_delivery
 logger = logging.getLogger(__name__)
 
 
-def build_dispatcher(ai: AIService, music: MusicService, yookassa: YooKassaService | None = None) -> Dispatcher:
+def build_dispatcher(
+    ai: AIService,
+    music: MusicService,
+    yookassa: YooKassaService | None = None,
+    keys: ApiKeys | None = None,
+) -> Dispatcher:
     # Updates from different users run concurrently (an AI call takes seconds);
     # updates from one user stay in order, so their FSM steps never race.
     dp = Dispatcher(use_create_task=True, event_isolation=SimpleEventIsolation())
     # Inner middlewares run in registration order, only for updates some handler accepts.
     dp.register_inner_middleware(DbSessionMiddleware(session_factory))
     dp.register_inner_middleware(UserMiddleware())
-    dp.register_inner_middleware(ServicesMiddleware(music=music, ai=ai, yookassa=yookassa))
+    dp.register_inner_middleware(ServicesMiddleware(music=music, ai=ai, yookassa=yookassa, keys=keys))
     dp.include_routers(*get_routers())
     return dp
 
@@ -63,17 +69,19 @@ def install_stop_signals(dp: Dispatcher) -> set[asyncio.Task]:
 async def main() -> None:
     logging.getLogger().setLevel(settings.log_level.upper())
     ai = AIService.from_settings(settings)
-    music = MusicService.from_settings(settings)
-    if settings.music_api_key is None:
-        logger.warning("MUSIC_API_KEY is not set: song orders will fail and be refunded")
     await init_db()
+    keys = ApiKeys(session_factory, settings)  # keys saved in /admin win over the environment
+    await keys.load()
+    music = MusicService.from_settings(settings, keys=keys)
+    if not keys.get("ACEMUSIC_API_KEY"):
+        logger.warning("ACEMUSIC_API_KEY is not set (env or /admin → 🔑 API Ключи): songs will fail and be refunded")
 
     bot = Bot(token=settings.bot_token.get_secret_value())
     await sync_commands(bot)
     yookassa = YooKassaService.from_settings(settings)
     if not yookassa.configured:
         logger.warning("YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY are not set: /shop can't take payments")
-    dp = build_dispatcher(ai, music, yookassa)
+    dp = build_dispatcher(ai, music, yookassa, keys)
     stop_tasks = install_stop_signals(dp)
     delivery = asyncio.create_task(run_song_delivery(bot, music, session_factory))
     payments = asyncio.create_task(run_payment_worker(bot, dp, yookassa, session_factory))

@@ -1,5 +1,6 @@
 from database.engine import close_db, engine, init_db, session_factory
 from database.models import (
+    ApiKey,
     Base,
     Generation,
     GenerationKind,
@@ -11,6 +12,7 @@ from database.models import (
 )
 
 __all__ = [
+    "ApiKey",
     "Base",
     "Generation",
     "GenerationKind",
