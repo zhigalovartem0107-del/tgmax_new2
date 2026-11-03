@@ -46,12 +46,12 @@ class Settings(BaseSettings):
     vk_cookies: SecretStr | None = None  # owner's logged-in vk.com cookies, fallback
     tiktok_cookies: SecretStr | None = None  # owner's logged-in tiktok.com cookies, fallback
 
-    # --- Songs: ACE-Step on fal.ai (defaults in services/music.py) ---
+    # --- Songs: ACE-Step 1.5 on acemusic.ai (defaults in services/music.py) ---
     music_api_key: SecretStr | None = Field(
-        default=None, validation_alias=AliasChoices("MUSIC_API_KEY", "FAL_KEY")
+        default=None, validation_alias=AliasChoices("ACEMUSIC_API_KEY", "MUSIC_API_KEY")
     )
-    music_model: str | None = None
-    music_duration: int | None = Field(default=None, ge=5, le=240)  # seconds; fal's range
+    music_model: str | None = None  # unset: the first model the API lists
+    music_duration: int | None = Field(default=None, ge=5, le=240)  # seconds
 
     # --- Video (not connected yet) ---
     video_api_url: str | None = None

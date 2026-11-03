@@ -57,7 +57,7 @@ keyboards/
   song.py          song flow buttons and styles
 services/
   ai.py            OpenRouter client that writes the lyrics
-  music.py         fal.ai client for ACE-Step songs
+  music.py         acemusic.ai client for ACE-Step songs
   video.py         video generation API client
   yookassa.py      YooKassa payments client
 workers/

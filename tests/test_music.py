@@ -1,5 +1,7 @@
-"""MusicService against a mocked fal.ai queue API (shapes from fal's queue and ACE-Step docs)."""
+"""MusicService against a mocked acemusic.ai API (shapes from ACE-Step's OpenAI-compatible API docs)."""
 
+import asyncio
+import base64
 import json
 
 import httpx2
@@ -10,198 +12,277 @@ import services.music as music_module
 from config import Settings
 from services.music import MusicError, MusicService, MusicStatus, audio_filename
 
-QUEUE = "https://queue.fal.run"
-RESPONSE_URL = f"{QUEUE}/fal-ai/ace-step/requests/req-1"
-AUDIO_URL = "https://v3.fal.media/files/rabbit/abc123/song.wav"
-
-SUBMITTED = {
-    "request_id": "req-1",
-    "response_url": RESPONSE_URL,
-    "status_url": f"{RESPONSE_URL}/status",
-    "cancel_url": f"{RESPONSE_URL}/cancel",
-    "queue_position": 0,
-}
-RESULT = {"audio": {"url": AUDIO_URL}, "seed": 42, "tags": "Рок", "lyrics": "[Куплет 1]\nКот"}
+API = "https://api.acemusic.ai"
+MODEL = "acemusic/acestep-v15-turbo"
+MP3 = b"ID3 fake mp3 bytes"
+DATA_URL = "data:audio/mpeg;base64," + base64.b64encode(MP3).decode()
+LYRICS = "[Куплет 1]\nКот"
 
 
 def _client(handler) -> httpx2.AsyncClient:
     return httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
 
 
-async def test_generate_song_queues_lyrics_and_returns_request_url():
-    requests = []
+def _chunk(delta: dict, finish_reason: str | None = None) -> dict:
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": MODEL,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+
+
+def _sse(*events) -> httpx2.Response:
+    body = "".join(f"data: {e if isinstance(e, str) else json.dumps(e)}\n\n" for e in events)
+    return httpx2.Response(200, headers={"content-type": "text/event-stream"}, content=body.encode())
+
+
+STREAM = [  # the documented event sequence
+    _chunk({"role": "assistant", "content": ""}),
+    _chunk({"content": "\n\n## Metadata\n**Caption:** Рок\n**BPM:** 120"}),
+    _chunk({"content": "."}),  # heartbeat, every 2 s while the audio renders
+    _chunk({"audio": [{"type": "audio_url", "audio_url": {"url": DATA_URL}}]}),
+    _chunk({}, finish_reason="stop"),
+    "[DONE]",
+]
+MODELS = {"object": "list", "data": [{"id": MODEL, "object": "model"}]}
+
+
+def _api(completion: httpx2.Response, requests: list | None = None):
+    """acemusic: GET /v1/models lists the model, POST /v1/chat/completions answers `completion`."""
 
     def handler(request: httpx2.Request) -> httpx2.Response:
-        requests.append(request)
-        return httpx2.Response(200, json=SUBMITTED)
+        if requests is not None:
+            requests.append(request)
+        if request.url.path == "/v1/models":
+            return httpx2.Response(200, json=MODELS)
+        return completion
 
-    music = MusicService("secret", model="fal-ai/ace-step", duration=120, http_client=_client(handler))
-    assert await music.generate_song(lyrics="[Куплет 1]\nКот", style="Рок") == RESPONSE_URL
+    return handler
+
+
+async def _finished(music: MusicService, task_id: str):
+    """get_result once the background generation has ended."""
+    for _ in range(300):
+        result = await music.get_result(task_id)
+        if result.status != MusicStatus.PROCESSING:
+            return result
+        await asyncio.sleep(0.01)
+    raise AssertionError("generation never finished")
+
+
+async def test_song_is_generated_and_downloaded():
+    requests = []
+    music = MusicService("secret", duration=120, http_client=_client(_api(_sse(*STREAM), requests)))
+
+    result = await _finished(music, await music.generate_song(lyrics=LYRICS, style="Рок"))
+    audio = await music.download(result.audio_url)
     await music.close()
 
-    [request] = requests
-    assert (request.method, str(request.url)) == ("POST", f"{QUEUE}/fal-ai/ace-step")
-    assert request.headers["authorization"] == "Key secret"
-    assert json.loads(request.content) == {"tags": "Рок", "lyrics": "[Куплет 1]\nКот", "duration": 120}
+    assert (result.status, audio) == (MusicStatus.DONE, MP3)
+    models, completion = requests
+    assert (models.method, str(models.url)) == ("GET", f"{API}/v1/models")
+    assert (completion.method, str(completion.url)) == ("POST", f"{API}/v1/chat/completions")
+    assert all(r.headers["authorization"] == "Bearer secret" for r in requests)
+    body = json.loads(completion.content)
+    assert body["model"] == MODEL  # the one /v1/models listed
+    assert body["stream"] is True  # heartbeats keep the connection open while the song renders
+    assert body["messages"] == [{"role": "user", "content": f"<prompt>Рок</prompt><lyrics>{LYRICS}</lyrics>"}]
+    assert body["audio_config"] == {"format": "mp3", "vocal_language": "ru", "duration": 120}
+
+
+async def test_generate_song_returns_before_the_song_is_ready():
+    gate = asyncio.Event()
+
+    async def slow(request: httpx2.Request) -> httpx2.Response:
+        await gate.wait()
+        return _sse(*STREAM)
+
+    music = MusicService("secret", model=MODEL, http_client=_client(slow))
+    task_id = await asyncio.wait_for(music.generate_song(lyrics=LYRICS, style="Рок"), timeout=1)
+    assert (await music.get_result(task_id)).status == MusicStatus.PROCESSING
+
+    gate.set()
+    assert (await _finished(music, task_id)).status == MusicStatus.DONE
+    await music.close()
+
+
+async def test_configured_model_is_used_without_asking_the_api():
+    requests = []
+    music = MusicService("secret", model="acemusic/acestep-v1.5-turbo", http_client=_client(_api(_sse(*STREAM), requests)))
+    await _finished(music, await music.generate_song(lyrics=LYRICS, style="Рок"))
+    await music.close()
+
+    [completion] = requests
+    assert json.loads(completion.content)["model"] == "acemusic/acestep-v1.5-turbo"
 
 
 @pytest.mark.parametrize(
-    ("response", "message"),
+    ("message", "audio_url"),
     [
-        (httpx2.Response(401, json={"detail": "Invalid API key"}), "401"),
-        (httpx2.Response(422, json={"detail": [{"loc": ["body", "tags"], "msg": "field required"}]}), "422"),
-        (httpx2.Response(200, json={"request_id": "req-1"}), "response_url"),
-        (httpx2.Response(200, json={**SUBMITTED, "response_url": "https://evil.example/r/1"}), "response_url"),
+        (
+            {"role": "assistant", "content": "Music generated successfully.",
+             "audio": [{"type": "audio_url", "audio_url": {"url": DATA_URL}}]},
+            DATA_URL,
+        ),
+        ({"role": "assistant", "content": "Готово: https://cdn.acemusic.ai/songs/abc.mp3"}, "https://cdn.acemusic.ai/songs/abc.mp3"),
     ],
-    ids=["unauthorized", "invalid-input", "no-response-url", "foreign-response-url"],
+    ids=["audio-field", "link-in-content"],
 )
-async def test_generate_song_failures_raise_music_error(response, message):
-    music = MusicService("secret", http_client=_client(lambda request: response))
-    with pytest.raises(MusicError, match=message):
-        await music.generate_song(lyrics="x", style="Поп")
+async def test_plain_json_answers_are_understood(message, audio_url):
+    answer = httpx2.Response(
+        200,
+        json={"id": "chatcmpl-1", "object": "chat.completion", "created": 1, "model": MODEL,
+              "choices": [{"index": 0, "message": message, "finish_reason": "stop"}]},
+    )
+    music = MusicService("secret", model=MODEL, http_client=_client(_api(answer)))
+    result = await _finished(music, await music.generate_song(lyrics=LYRICS, style="Рок"))
     await music.close()
 
+    assert (result.status, result.audio_url) == (MusicStatus.DONE, audio_url)
 
-async def test_unreachable_queue_raises_music_error():
+
+@pytest.mark.parametrize(
+    ("completion", "message"),
+    [
+        (httpx2.Response(401, json={"detail": "Invalid API key"}), "401"),
+        (httpx2.Response(429, json={"detail": "Service busy, queue full"}), "queue full"),
+        (_sse(_chunk({"content": "."}), _chunk({}, finish_reason="stop"), "[DONE]"), "no audio"),
+    ],
+    ids=["unauthorized", "busy", "no-audio"],
+)
+async def test_failed_generation_is_reported(completion, message):
+    music = MusicService("secret", model=MODEL, http_client=_client(_api(completion)))
+    result = await _finished(music, await music.generate_song(lyrics=LYRICS, style="Рок"))
+    await music.close()
+
+    assert result.status == MusicStatus.FAILED and message in result.error
+
+
+async def test_unreachable_api_is_reported():
     def handler(request: httpx2.Request) -> httpx2.Response:
         raise httpx2.ConnectError("connection refused")
 
-    music = MusicService("secret", http_client=_client(handler))
-    with pytest.raises(MusicError, match="unreachable"):
-        await music.generate_song(lyrics="x", style="Поп")
+    music = MusicService("secret", model=MODEL, http_client=_client(handler))
+    result = await _finished(music, await music.generate_song(lyrics=LYRICS, style="Рок"))
     await music.close()
 
+    assert result.status == MusicStatus.FAILED and "unreachable" in result.error
 
-async def test_missing_key_raises_music_error():
+
+async def test_hung_generation_gives_up(monkeypatch):
+    monkeypatch.setattr(music_module, "GENERATION_TIMEOUT", 0.05)
+
+    async def never(request: httpx2.Request) -> httpx2.Response:
+        await asyncio.Event().wait()
+
+    music = MusicService("secret", model=MODEL, http_client=_client(never))
+    task_id = await asyncio.wait_for(music.generate_song(lyrics=LYRICS, style="Рок"), timeout=1)
+    result = await _finished(music, task_id)
+    await music.close()
+
+    assert result.status == MusicStatus.FAILED and "took longer" in result.error
+
+
+async def test_missing_key_fails_at_once():
     music = MusicService(None)
-    with pytest.raises(MusicError, match="MUSIC_API_KEY"):
-        await music.generate_song(lyrics="x", style="Поп")
+    with pytest.raises(MusicError, match="ACEMUSIC_API_KEY"):
+        await music.generate_song(lyrics=LYRICS, style="Рок")
     await music.close()
 
 
-@pytest.mark.parametrize(
-    ("status", "result", "expected_status", "audio_url", "error"),
-    [
-        (httpx2.Response(202, json={"status": "IN_QUEUE", "queue_position": 3}), None, MusicStatus.PROCESSING, None, None),
-        (httpx2.Response(202, json={"status": "IN_PROGRESS"}), None, MusicStatus.PROCESSING, None, None),
-        (httpx2.Response(200, json={"status": "COMPLETED"}), httpx2.Response(200, json=RESULT), MusicStatus.DONE, AUDIO_URL, None),
-        (
-            httpx2.Response(200, json={"status": "COMPLETED", "error": "Runner crashed", "error_type": "runner_error"}),
-            None,
-            MusicStatus.FAILED,
-            None,
-            "Runner crashed",
-        ),
-        (
-            httpx2.Response(200, json={"status": "COMPLETED"}),
-            httpx2.Response(422, json={"detail": [{"msg": "lyrics too long"}]}),
-            MusicStatus.FAILED,
-            None,
-            "lyrics too long",
-        ),
-        (httpx2.Response(200, json={"status": "COMPLETED"}), httpx2.Response(404, json={"detail": "Not found"}), MusicStatus.FAILED, None, "404"),
-        (httpx2.Response(200, json={"status": "COMPLETED"}), httpx2.Response(200, json={"seed": 1}), MusicStatus.FAILED, None, "no audio"),
-    ],
-    ids=["queued", "in-progress", "done", "failed-run", "invalid-input", "expired", "no-audio"],
-)
-async def test_get_result(status, result, expected_status, audio_url, error):
+async def test_job_unknown_after_a_restart_is_failed():
+    music = MusicService("secret")
+    assert (await music.get_result("job-from-before-the-restart")).status == MusicStatus.FAILED
+    await music.close()
+
+
+async def test_finished_jobs_are_forgotten_after_a_while(monkeypatch):
+    music = MusicService("secret", model=MODEL, http_client=_client(_api(_sse(*STREAM))))
+    task_id = await music.generate_song(lyrics=LYRICS, style="Рок")
+    assert (await _finished(music, task_id)).status == MusicStatus.DONE
+
+    monkeypatch.setattr(music_module, "JOB_TTL", -1)
+    assert (await music.get_result(task_id)).status == MusicStatus.FAILED
+    await music.close()
+
+
+async def test_close_stops_running_generations():
+    async def never(request: httpx2.Request) -> httpx2.Response:
+        await asyncio.Event().wait()
+
+    music = MusicService("secret", model=MODEL, http_client=_client(never))
+    await asyncio.wait_for(music.generate_song(lyrics=LYRICS, style="Рок"), timeout=1)
+    await asyncio.sleep(0)
+    await asyncio.wait_for(music.close(), timeout=1)
+
+
+async def test_download_of_a_link_sends_no_key_to_other_hosts():
     requests = []
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        requests.append(request)
-        return status if request.url.path.endswith("/status") else result
-
-    music = MusicService("secret", http_client=_client(handler))
-    outcome = await music.get_result(RESPONSE_URL)
+    music = MusicService("secret", http_client=_client(lambda r: requests.append(r) or httpx2.Response(200, content=MP3)))
+    assert await music.download("https://cdn.acemusic.ai/songs/abc.mp3") == MP3
     await music.close()
-
-    assert (outcome.status, outcome.audio_url) == (expected_status, audio_url)
-    if error:
-        assert error in outcome.error
-    assert (requests[0].method, str(requests[0].url)) == ("GET", f"{RESPONSE_URL}/status")
-    assert all(r.headers["authorization"] == "Key secret" for r in requests)
-    if result is not None:
-        assert str(requests[1].url) == RESPONSE_URL
-
-
-async def test_server_error_on_result_is_retried_later():
-    """A 5xx when fetching a finished result may be temporary: not a failed song."""
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        if request.url.path.endswith("/status"):
-            return httpx2.Response(200, json={"status": "COMPLETED"})
-        return httpx2.Response(500, json={"detail": "Internal Server Error"})
-
-    music = MusicService("secret", http_client=_client(handler))
-    with pytest.raises(MusicError, match="500"):
-        await music.get_result(RESPONSE_URL)
-    await music.close()
-
-
-async def test_key_is_never_sent_outside_the_queue():
-    requests = []
-    music = MusicService("secret", http_client=_client(lambda r: requests.append(r) or httpx2.Response(200, json={})))
-
-    with pytest.raises(MusicError):
-        await music.get_result("https://evil.example/requests/1")
-    await music.download(AUDIO_URL)  # the CDN gets no key either
-    await music.close()
-
-    assert [str(r.url) for r in requests] == [AUDIO_URL]
     assert "authorization" not in requests[0].headers
 
 
-async def test_download_returns_audio_bytes():
-    music = MusicService("secret", http_client=_client(lambda r: httpx2.Response(200, content=b"RIFF fake wav")))
-    assert await music.download(AUDIO_URL) == b"RIFF fake wav"
+@pytest.mark.parametrize("url", ["data:audio/mpeg;base64,@@not base64@@", "data:audio/mpeg,plain-text"])
+async def test_broken_audio_data_raises_music_error(url):
+    music = MusicService("secret")
+    with pytest.raises(MusicError):
+        await music.download(url)
     await music.close()
 
 
 async def test_download_rejects_oversized_audio(monkeypatch):
-    monkeypatch.setattr(music_module, "MAX_AUDIO_BYTES", 10)
-    music = MusicService("secret", http_client=_client(lambda r: httpx2.Response(200, content=b"x" * 11)))
+    monkeypatch.setattr(music_module, "MAX_AUDIO_BYTES", 5)
+    music = MusicService("secret")
     with pytest.raises(MusicError, match="too large"):
-        await music.download(AUDIO_URL)
+        await music.download(DATA_URL)
     await music.close()
 
 
 @pytest.mark.parametrize(
     ("url", "filename"),
     [
-        (AUDIO_URL, "song.wav"),
-        ("https://v3.fal.media/files/a/track.MP3?sig=1", "song.mp3"),
-        ("https://v3.fal.media/files/a/no-extension", "song.mp3"),
+        (DATA_URL, "song.mp3"),
+        ("data:audio/wav;base64,UklGRg==", "song.wav"),
+        ("https://cdn.acemusic.ai/songs/abc.wav", "song.wav"),
+        ("https://cdn.acemusic.ai/songs/abc.MP3?sig=1", "song.mp3"),
+        ("https://cdn.acemusic.ai/songs/abc", "song.mp3"),
     ],
 )
 def test_audio_filename_follows_the_file_type(url, filename):
     assert audio_filename(url) == filename
 
 
-@pytest.mark.parametrize("key_variable", ["MUSIC_API_KEY", "FAL_KEY"])
+@pytest.mark.parametrize("key_variable", ["ACEMUSIC_API_KEY", "MUSIC_API_KEY"])
 async def test_settings_come_from_env(monkeypatch, key_variable):
-    for name in ("MUSIC_API_KEY", "FAL_KEY"):
+    for name in ("ACEMUSIC_API_KEY", "MUSIC_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(key_variable, "env-key")
-    monkeypatch.setenv("MUSIC_MODEL", "fal-ai/ace-step/prompt-to-audio")
+    monkeypatch.setenv("MUSIC_MODEL", "acemusic/acestep-v1.5-turbo")
     monkeypatch.setenv("MUSIC_DURATION", "90")
     requests = []
 
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        requests.append(request)
-        return httpx2.Response(200, json=SUBMITTED)
-
-    music = MusicService.from_settings(Settings(_env_file=None), http_client=_client(handler))
-    await music.generate_song(lyrics="x", style="Поп")
+    music = MusicService.from_settings(Settings(_env_file=None), http_client=_client(_api(_sse(*STREAM), requests)))
+    await _finished(music, await music.generate_song(lyrics=LYRICS, style="Рок"))
     await music.close()
 
-    [request] = requests
-    assert str(request.url) == f"{QUEUE}/fal-ai/ace-step/prompt-to-audio"
-    assert request.headers["authorization"] == "Key env-key"
-    assert json.loads(request.content)["duration"] == 90
+    [completion] = requests
+    body = json.loads(completion.content)
+    assert completion.headers["authorization"] == "Bearer env-key"
+    assert (body["model"], body["audio_config"]["duration"]) == ("acemusic/acestep-v1.5-turbo", 90)
+
+
+def test_acemusic_key_wins_over_the_fallback(monkeypatch):
+    monkeypatch.setenv("ACEMUSIC_API_KEY", "primary")
+    monkeypatch.setenv("MUSIC_API_KEY", "fallback")
+    assert Settings(_env_file=None).music_api_key.get_secret_value() == "primary"
 
 
 @pytest.mark.parametrize("duration", ["0", "600"])
-def test_duration_outside_fal_range_is_rejected(monkeypatch, duration):
+def test_duration_outside_the_allowed_range_is_rejected(monkeypatch, duration):
     monkeypatch.setenv("MUSIC_DURATION", duration)
     with pytest.raises(ValidationError):
         Settings(_env_file=None)

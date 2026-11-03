@@ -1,12 +1,24 @@
-"""Song generation with ACE-Step on fal.ai, through fal's queue API.
+"""Song generation with ACE-Step 1.5 on acemusic.ai (OpenAI-compatible chat API).
 
-1. POST https://queue.fal.run/{model} queues the job; its `response_url` is our task id.
-2. GET {response_url}/status says IN_QUEUE / IN_PROGRESS (HTTP 202) or COMPLETED (200).
-   A failed run is COMPLETED too, with `error` set.
-3. GET {response_url} returns the output: {"audio": {"url": ...}, ...} or {"detail": ...}.
-4. The audio file is downloaded from fal's CDN, which needs no key.
+The API is synchronous: one POST /v1/chat/completions returns the finished song,
+base64-encoded in choices[0].message.audio, after minutes of generation. The bot's
+flow is submit -> poll -> download, so generate_song() runs that request in the
+background and returns a job id at once; get_result() reports on the job and
+download() decodes the audio. The request is streamed: during generation the
+server sends a heartbeat every 2 seconds, so proxies don't cut a silent connection
+(the hosted API is known to answer 504 to long non-streamed requests).
+
+Jobs live in this process: after a restart get_result() reports them as failed,
+and the delivery job refunds them.
 """
 
+import asyncio
+import base64
+import binascii
+import json
+import re
+import time
+import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import PurePosixPath
@@ -16,12 +28,24 @@ import httpx2
 
 from config import Settings
 
-QUEUE_URL = "https://queue.fal.run"
-DEFAULT_MODEL = "fal-ai/ace-step"
-DEFAULT_DURATION = 180  # seconds of audio; fal bills per second
-MAX_AUDIO_BYTES = 100 * 1024 * 1024  # a 4-minute WAV is about 40 MB
+API_URL = "https://api.acemusic.ai"
+DEFAULT_DURATION = 180  # seconds of audio
+GENERATION_TIMEOUT = 15 * 60  # seconds; the delivery job refunds after 20 minutes anyway
+JOB_TTL = 60 * 60  # how long a finished job is kept for the delivery job to collect
+MAX_AUDIO_BYTES = 100 * 1024 * 1024
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".opus"}
+MIME_EXTENSIONS = {
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/flac": ".flac",
+    "audio/ogg": ".ogg",
+    "audio/mp4": ".m4a",
+    "audio/aac": ".aac",
+}
+_LINK = re.compile(r"https?://[^\s)\"'<>]+")
 
 
 class MusicError(Exception):
@@ -37,118 +61,221 @@ class MusicStatus(StrEnum):
 @dataclass(frozen=True)
 class MusicResult:
     status: MusicStatus
-    audio_url: str | None = None
+    audio_url: str | None = None  # a data: URL with the audio itself, or a link to it
     error: str | None = None
 
 
 def audio_filename(audio_url: str) -> str:
-    """'song' plus the file's own extension, so a WAV isn't sent as song.mp3."""
+    """'song' plus the audio's own extension, so a WAV isn't sent as song.mp3."""
+    if audio_url.startswith("data:"):
+        mime = audio_url[5:].split(",", 1)[0].split(";", 1)[0].lower()
+        return f"song{MIME_EXTENSIONS.get(mime, '.mp3')}"
     extension = PurePosixPath(urlparse(audio_url).path).suffix.lower()
     return f"song{extension if extension in AUDIO_EXTENSIONS else '.mp3'}"
+
+
+@dataclass
+class _Job:
+    task: asyncio.Task
+    finished_at: float | None = None
 
 
 class MusicService:
     def __init__(
         self,
         api_key: str | None,
-        model: str = DEFAULT_MODEL,
+        model: str | None = None,  # None: the first model GET /v1/models lists
         duration: int = DEFAULT_DURATION,
         http_client: httpx2.AsyncClient | None = None,
+        base_url: str = API_URL,
     ) -> None:
         self.model = model
         self.duration = duration
-        self._auth = {"Authorization": f"Key {api_key}"} if api_key else {}
+        self.base_url = base_url.rstrip("/")
+        self._auth = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        # 60 s between bytes is plenty: the stream carries a heartbeat every 2 s.
         self._http = http_client or httpx2.AsyncClient(timeout=60.0)
+        self._jobs: dict[str, _Job] = {}
 
     @classmethod
     def from_settings(cls, cfg: Settings, **kwargs) -> "MusicService":
-        """Build from MUSIC_API_KEY (or FAL_KEY), MUSIC_MODEL and MUSIC_DURATION."""
+        """Build from ACEMUSIC_API_KEY (or MUSIC_API_KEY), MUSIC_MODEL and MUSIC_DURATION."""
         return cls(
             cfg.music_api_key.get_secret_value() if cfg.music_api_key else None,
-            model=cfg.music_model or DEFAULT_MODEL,
+            model=cfg.music_model,
             duration=cfg.music_duration or DEFAULT_DURATION,
             **kwargs,
         )
 
     async def generate_song(self, lyrics: str, style: str) -> str:
-        """Queue a generation job and return its id (fal's response_url)."""
+        """Start generating in the background and return the job id right away."""
         if not self._auth:
-            raise MusicError("MUSIC_API_KEY is not set")
-        response = await self._request(
-            "POST",
-            f"{QUEUE_URL}/{self.model}",
-            json={"tags": style, "lyrics": lyrics, "duration": self.duration},
-        )
-        if not response.is_success:
-            raise MusicError(f"fal HTTP {response.status_code}: {_detail(response)}")
-        response_url = _json(response).get("response_url")
-        if not isinstance(response_url, str) or not _is_queue_url(response_url):
-            raise MusicError(f"no usable response_url in fal's answer: {response.text[:200]}")
-        return response_url
+            raise MusicError("ACEMUSIC_API_KEY is not set")
+        self._forget_old_jobs()
+        task_id = uuid.uuid4().hex
+        job = _Job(asyncio.create_task(self._generate(lyrics, style)))
+        job.task.add_done_callback(lambda _task: setattr(job, "finished_at", time.monotonic()))
+        self._jobs[task_id] = job
+        return task_id
 
     async def get_result(self, task_id: str) -> MusicResult:
-        if not _is_queue_url(task_id):  # never send the key anywhere else
-            raise MusicError(f"not a fal queue request: {task_id!r}")
-
-        status_response = await self._request("GET", f"{task_id}/status")
-        if status_response.status_code not in (200, 202):
-            raise MusicError(f"fal status HTTP {status_response.status_code}: {_detail(status_response)}")
-        status = _json(status_response)
-        if status.get("status") in ("IN_QUEUE", "IN_PROGRESS"):
+        self._forget_old_jobs()
+        job = self._jobs.get(task_id)
+        if job is None:
+            return MusicResult(MusicStatus.FAILED, error="unknown job: the bot restarted during generation?")
+        if not job.task.done():
             return MusicResult(MusicStatus.PROCESSING)
-        if status.get("status") != "COMPLETED":
-            raise MusicError(f"unexpected fal status: {status_response.text[:200]}")
-        if status.get("error"):
-            return MusicResult(MusicStatus.FAILED, error=f"{status.get('error_type')}: {status['error']}")
-
-        result = await self._request("GET", task_id)
-        if result.status_code >= 500:  # may be temporary: let the worker retry
-            raise MusicError(f"fal result HTTP {result.status_code}: {_detail(result)}")
-        if result.status_code != 200:
-            return MusicResult(MusicStatus.FAILED, error=f"HTTP {result.status_code}: {_detail(result)}")
-        audio = _json(result).get("audio")
-        audio_url = audio.get("url") if isinstance(audio, dict) else None
-        if not audio_url:
-            return MusicResult(MusicStatus.FAILED, error="no audio in the result")
-        return MusicResult(MusicStatus.DONE, audio_url=audio_url)
+        if job.task.cancelled():
+            return MusicResult(MusicStatus.FAILED, error="generation was cancelled")
+        if job.task.exception() is not None:
+            return MusicResult(MusicStatus.FAILED, error=str(job.task.exception()))
+        return MusicResult(MusicStatus.DONE, audio_url=job.task.result())
 
     async def download(self, audio_url: str) -> bytes:
-        response = await self._request("GET", audio_url)
-        if response.status_code != 200:
-            raise MusicError(f"audio download HTTP {response.status_code}")
-        if len(response.content) > MAX_AUDIO_BYTES:
-            raise MusicError(f"audio is too large: {len(response.content)} bytes")
-        return response.content
+        if audio_url.startswith("data:"):
+            audio = _decode_data_url(audio_url)
+        else:
+            response = await self._request("GET", audio_url)
+            if response.status_code != 200:
+                raise MusicError(f"audio download HTTP {response.status_code}")
+            audio = response.content
+        if len(audio) > MAX_AUDIO_BYTES:
+            raise MusicError(f"audio is too large: {len(audio)} bytes")
+        return audio
 
     async def close(self) -> None:
+        for job in self._jobs.values():
+            job.task.cancel()
+        await asyncio.gather(*(job.task for job in self._jobs.values()), return_exceptions=True)
         await self._http.aclose()
 
+    async def _generate(self, lyrics: str, style: str) -> str:
+        """One generation; returns the audio as a data: URL (or a link to it)."""
+        try:
+            async with asyncio.timeout(GENERATION_TIMEOUT):
+                payload = {
+                    "model": self.model or await self._discover_model(),
+                    "messages": [{"role": "user", "content": f"<prompt>{style}</prompt><lyrics>{lyrics}</lyrics>"}],
+                    "stream": True,
+                    "audio_config": {"format": "mp3", "vocal_language": "ru", "duration": self.duration},
+                }
+                async with self._http.stream(
+                    "POST", f"{self.base_url}/v1/chat/completions", json=payload, headers=self._auth
+                ) as response:
+                    if response.status_code != 200:
+                        await response.aread()
+                        raise MusicError(f"acemusic HTTP {response.status_code}: {_detail(response)}")
+                    if response.headers.get("content-type", "").startswith("text/event-stream"):
+                        audio_url, text = await _read_stream(response)
+                    else:
+                        await response.aread()
+                        audio_url, text = _read_message(_json(response))
+        except TimeoutError:
+            raise MusicError(f"generation took longer than {GENERATION_TIMEOUT} s") from None
+        except httpx2.HTTPError as exc:
+            raise MusicError(f"acemusic unreachable: {exc}") from exc
+
+        audio_url = audio_url or _audio_link(text)
+        if not audio_url:
+            raise MusicError("no audio in acemusic's answer")
+        return audio_url
+
+    async def _discover_model(self) -> str:
+        response = await self._request("GET", f"{self.base_url}/v1/models")
+        if response.status_code != 200:
+            raise MusicError(f"acemusic /v1/models HTTP {response.status_code}: {_detail(response)}")
+        models = _json(response).get("data") or []
+        model = next((m["id"] for m in models if isinstance(m, dict) and m.get("id")), None)
+        if model is None:
+            raise MusicError("acemusic lists no models")
+        self.model = model
+        return model
+
     async def _request(self, method: str, url: str, **kwargs) -> httpx2.Response:
-        headers = self._auth if _is_queue_url(url) else {}
+        headers = self._auth if url.startswith(self.base_url + "/") else {}  # the key goes only to the API
         try:
             return await self._http.request(method, url, headers=headers, **kwargs)
         except httpx2.HTTPError as exc:
-            raise MusicError(f"music API unreachable: {exc}") from exc
+            raise MusicError(f"acemusic unreachable: {exc}") from exc
+
+    def _forget_old_jobs(self) -> None:
+        now = time.monotonic()
+        for task_id, job in list(self._jobs.items()):
+            if job.finished_at is not None and now - job.finished_at > JOB_TTL:
+                if not job.task.cancelled():
+                    job.task.exception()  # mark a failure as seen before dropping it
+                del self._jobs[task_id]
 
 
-def _is_queue_url(url: str) -> bool:
-    return url.startswith(QUEUE_URL + "/")
+async def _read_stream(response: httpx2.Response) -> tuple[str | None, str]:
+    """SSE: `data: {chunk}` lines until `data: [DONE]`; the audio comes in one chunk's delta."""
+    audio_url, text = None, []
+    async for line in response.aiter_lines():
+        if not line.startswith("data: "):
+            continue
+        data = line[len("data: "):].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            continue
+        for choice in chunk.get("choices") or []:
+            delta = choice.get("delta") or {}
+            text.append(delta.get("content") or "")
+            audio_url = audio_url or _audio_in(delta)
+    return audio_url, "".join(text)
+
+
+def _read_message(body: dict) -> tuple[str | None, str]:
+    """A plain (non-streamed) chat completion."""
+    choices = body.get("choices") or []
+    first = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = first.get("message") or {}
+    return _audio_in(message), message.get("content") or ""
+
+
+def _audio_in(part: dict) -> str | None:
+    """The first {"audio": [{"type": "audio_url", "audio_url": {"url": ...}}]} entry."""
+    for item in part.get("audio") or []:
+        url = (item.get("audio_url") or {}).get("url") if isinstance(item, dict) else None
+        if url:
+            return url
+    return None
+
+
+def _audio_link(text: str) -> str | None:
+    """A link to the audio in the text answer, preferring one that names an audio file."""
+    links = _LINK.findall(text or "")
+    audio = [link for link in links if PurePosixPath(urlparse(link).path).suffix.lower() in AUDIO_EXTENSIONS]
+    return (audio or links or [None])[0]
+
+
+def _decode_data_url(url: str) -> bytes:
+    header, _, data = url.partition(",")
+    if not header.endswith(";base64"):
+        raise MusicError("the audio data is not base64")
+    try:
+        return base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise MusicError(f"broken audio data: {exc}") from exc
 
 
 def _json(response: httpx2.Response) -> dict:
     try:
         body = response.json()
     except ValueError as exc:
-        raise MusicError(f"fal answered with non-JSON: {response.text[:200]}") from exc
+        raise MusicError(f"acemusic answered with non-JSON: {response.text[:200]}") from exc
     return body if isinstance(body, dict) else {}
 
 
 def _detail(response: httpx2.Response) -> str:
-    """fal's error text: {"detail": "..."} or a list of validation errors."""
+    """The API's error text: {"detail": "..."} or OpenAI-style {"error": {"message": "..."}}."""
     try:
-        detail = response.json().get("detail")
-    except (ValueError, AttributeError):
+        body = response.json()
+    except ValueError:
         return response.text[:200]
-    if isinstance(detail, list):
-        return "; ".join(str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in detail)
-    return str(detail or response.text[:200])
+    if not isinstance(body, dict):
+        return response.text[:200]
+    error = body.get("error")
+    return str(body.get("detail") or (error.get("message") if isinstance(error, dict) else error) or response.text[:200])
