@@ -106,7 +106,7 @@ async def test_admin_saves_a_key_and_it_is_used_at_once(bot, admin):
     await bot.tap("✏️ ACE Music")
     assert "ACEMUSIC_API_KEY" in bot.last.text  # asks for the value
 
-    await bot.text(f"  {KEY}​\n")  # as pasted: spaces, a zero-width character, a newline
+    await bot.text(f"  {KEY}\u200b\n")  # as pasted: spaces, a zero-width character, a newline
 
     assert bot.keys.get("ACEMUSIC_API_KEY") == KEY
     assert bot.music_key() == KEY  # the running MusicService sees it

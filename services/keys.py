@@ -30,7 +30,7 @@ KEYS = (
 )
 
 # What copy-paste adds invisibly: zero-width characters and BOM.
-_INVISIBLE = re.compile("[​-‏⁠﻿]")
+_INVISIBLE = re.compile("[\u200b-\u200f\u2060\ufeff]")
 
 
 def mask(value: str) -> str:
