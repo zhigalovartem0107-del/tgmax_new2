@@ -1,13 +1,18 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 from conftest import USER_ID
+from maxapi import Bot
+from maxapi.exceptions.max import MaxApiError
 from sqlalchemy import select
 
+from config import Settings, settings
 from database import Generation, GenerationStatus, crud
-from handlers.song import LYRICS_DRAFTS_MAX, LYRICS_MAX, STYLE_MAX
+from handlers import song as song_handlers
+from handlers.song import LYRICS_MAX, STYLE_MAX
 from services import MusicService
-from services.ai import AIService, LyricsError
+from services.ai import AIService, LyricsError, LyricsRateLimited
 
 PRICE = 10  # SONG_PRICE in conftest
 LYRICS_BUTTONS = {"✅ Создать песню", "🔄 Перегенерировать текст", "❌ Отмена"}
@@ -117,16 +122,84 @@ async def test_create_song_uses_latest_draft(bot, session, ai, provider):
 
 
 async def test_regenerations_are_capped(bot, session, ai):
+    cap = settings.lyrics_drafts_max
     await bot.start()
     await _fund(session, PRICE)
     await _order_ai_rock_song(bot)
     await bot.tap("✅ Создать")
-    for _ in range(LYRICS_DRAFTS_MAX - 1):
+    for _ in range(cap - 1):
         await bot.tap("🔄 Перегенерировать текст")
 
-    assert bot.last.text == lyrics_message(f"Текст {LYRICS_DRAFTS_MAX}")
+    assert bot.last.text.startswith(lyrics_message(f"Текст {cap}"))
+    assert "последний вариант" in bot.last.text  # says why there is no 🔄 any more
     assert set(bot.last.buttons) == {"✅ Создать песню", "❌ Отмена"}
-    assert len(ai.calls) == LYRICS_DRAFTS_MAX
+    assert len(ai.calls) == cap
+
+
+def test_drafts_per_order_come_from_env(monkeypatch):
+    monkeypatch.delenv("LYRICS_DRAFTS_MAX", raising=False)
+    assert Settings(_env_file=None).lyrics_drafts_max == 10
+    monkeypatch.setenv("LYRICS_DRAFTS_MAX", "0")
+    assert Settings(_env_file=None).lyrics_drafts_max == 0
+
+
+@pytest.mark.parametrize("cap", [3, 0], ids=["three", "no-limit"])
+async def test_drafts_per_order_are_configurable(bot, session, ai, monkeypatch, cap):
+    monkeypatch.setattr(settings, "lyrics_drafts_max", cap)
+    await bot.start()
+    await _fund(session, PRICE)
+    await _order_ai_rock_song(bot)
+    await bot.tap("✅ Создать")
+    for _ in range(2):
+        await bot.tap("🔄 Перегенерировать текст")
+
+    assert len(ai.calls) == 3
+    if cap:
+        assert set(bot.last.buttons) == {"✅ Создать песню", "❌ Отмена"}
+        assert "последний вариант" in bot.last.text
+    else:
+        assert set(bot.last.buttons) == LYRICS_BUTTONS
+        assert bot.last.text == lyrics_message("Текст 3")
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "when"),
+    [
+        (600, "через 10 мин"),
+        (90, "через 2 мин"),
+        (20, "через минуту"),
+        (3 * 3600 + 60, "через 3 ч 1 мин"),
+        (None, "через пару минут"),
+    ],
+    ids=["10-min", "2-min", "1-min", "3-h", "unknown"],
+)
+async def test_rate_limit_says_when_to_retry(bot, session, ai, retry_after, when):
+    await bot.start()
+    await _fund(session, PRICE)
+    await _order_ai_rock_song(bot)
+    ai.drafts.append(LyricsRateLimited(retry_after))
+
+    await bot.tap("✅ Создать")
+    assert bot.last.text.startswith("⏳") and when in bot.last.text
+    assert set(bot.last.buttons) == {"✅ Создать", "❌ Отмена"}  # the order is kept for the retry
+
+    await bot.tap("✅ Создать")
+    assert bot.last.text == lyrics_message("Текст 2")
+
+
+async def test_rate_limited_redraft_keeps_previous_lyrics(bot, session, ai, provider):
+    await bot.start()
+    await _fund(session, PRICE)
+    await _order_ai_rock_song(bot)
+    await bot.tap("✅ Создать")
+    ai.drafts.append(LyricsRateLimited(60))
+
+    await bot.tap("🔄 Перегенерировать текст")
+    assert bot.last.text.startswith("⏳") and "через минуту" in bot.last.text
+    assert set(bot.last.buttons) == LYRICS_BUTTONS
+
+    await bot.tap("✅ Создать песню")
+    assert provider == [{"lyrics": "Текст 1", "style": "Рок"}]
 
 
 @pytest.mark.parametrize(
@@ -264,3 +337,107 @@ async def test_menu_buttons_work_mid_flow(bot):
 
     await bot.tap("💰 Баланс", menu)
     assert bot.last.text.startswith("💰 Баланс: 0")
+
+
+# --- MAX trouble with cosmetic calls ("typing…", answering a tap) never costs the user the lyrics ---
+
+
+async def _until(condition, timeout: float = 6.0) -> None:
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+async def _never_answers(*args, **kwargs):
+    await asyncio.Event().wait()
+
+
+async def test_failed_typing_indicator_does_not_skip_the_lyrics(bot, session, ai, monkeypatch):
+    """MAX refusing "typing…" used to end the draft before the AI was even asked."""
+
+    async def send_action(self, chat_id=None, action=None, *a, **kw):
+        raise MaxApiError(code=500, raw="typing failed")
+
+    monkeypatch.setattr(Bot, "send_action", send_action)
+    await bot.start()
+    await _fund(session, PRICE)
+    await _order_ai_rock_song(bot)
+
+    await bot.tap("✅ Создать")
+
+    assert ai.calls == [("песня про кота", "Рок")]
+    assert bot.last.text == lyrics_message("Текст 1")
+
+
+async def test_typing_failure_while_the_ai_works_keeps_the_lyrics(bot, session, monkeypatch):
+    """A "typing…" refresh failing mid-draft used to throw away the lyrics the AI had written."""
+    monkeypatch.setattr(song_handlers, "TYPING_INTERVAL", 0.01, raising=False)
+    actions = []
+
+    async def send_action(self, chat_id=None, action=None, *a, **kw):
+        actions.append(action)
+        if len(actions) > 1:
+            raise MaxApiError(code=500, raw="typing failed")
+
+    async def write_lyrics(self, description, style):
+        await _until(lambda: len(actions) > 1)  # a refresh has failed by the time the AI answers
+        return "Текст про кота"
+
+    monkeypatch.setattr(Bot, "send_action", send_action)
+    monkeypatch.setattr(AIService, "write_lyrics", write_lyrics)
+    await bot.start()
+    await _fund(session, PRICE)
+    await _order_ai_rock_song(bot)
+
+    await bot.tap("✅ Создать")
+
+    assert bot.last.text == lyrics_message("Текст про кота")
+
+
+async def test_hanging_typing_indicator_does_not_hold_up_the_lyrics(bot, session, ai, monkeypatch):
+    monkeypatch.setattr(Bot, "send_action", _never_answers)
+    await bot.start()
+    await _fund(session, PRICE)
+    await _order_ai_rock_song(bot)
+
+    await asyncio.wait_for(bot.tap("✅ Создать"), timeout=3)
+
+    assert bot.last.text == lyrics_message("Текст 1")
+
+
+@pytest.mark.parametrize("trouble", ["fails", "hangs"])
+async def test_tap_answer_trouble_does_not_skip_the_lyrics(bot, session, ai, monkeypatch, trouble):
+    """Removing the tapped buttons is cosmetic: the draft goes on if MAX fails or is slow to do it."""
+    monkeypatch.setattr(song_handlers, "ANSWER_TIMEOUT", 0.05, raising=False)
+    await bot.start()
+    await _fund(session, PRICE)
+    await _order_ai_rock_song(bot)
+
+    async def send_callback(self, *a, **kw):
+        if trouble == "hangs":
+            await asyncio.Event().wait()
+        raise MaxApiError(code=500, raw="callback failed")
+
+    monkeypatch.setattr(Bot, "send_callback", send_callback)
+    await asyncio.wait_for(bot.tap("✅ Создать"), timeout=3)
+
+    assert ai.calls == [("песня про кота", "Рок")]
+    assert bot.last.text == lyrics_message("Текст 1")
+
+
+async def test_failed_tap_answer_still_creates_the_song(bot, session, ai, provider, monkeypatch):
+    """The order used to be lost: its state was cleared, then answering the tap failed."""
+    await bot.start()
+    await _fund(session, PRICE)
+    await _order_ai_rock_song(bot)
+    await bot.tap("✅ Создать")
+
+    async def send_callback(self, *a, **kw):
+        raise MaxApiError(code=500, raw="callback failed")
+
+    monkeypatch.setattr(Bot, "send_callback", send_callback)
+    await bot.tap("✅ Создать песню")
+
+    assert provider == [{"lyrics": "Текст 1", "style": "Рок"}]
+    assert bot.last.text.startswith("🎶 Песня создаётся")
+    assert await _balance(session) == 0

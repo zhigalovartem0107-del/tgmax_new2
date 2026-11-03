@@ -29,7 +29,7 @@ async def test_balance_and_video_stub(bot):
     await bot.tap("💰 Баланс", menu)
     assert bot.last.text == "💰 Баланс: 0\n📅 Подписка: нет"
     await bot.tap("🎬 Создать видео", menu)
-    assert bot.last.notification == "🚧 Скоро будет доступно"
+    assert bot.last.notification == "🚧 В разработке"  # details: tests/test_video.py
 
 
 async def test_sync_commands_replaces_menu_on_max(monkeypatch):

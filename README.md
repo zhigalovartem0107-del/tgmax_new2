@@ -16,6 +16,14 @@ Data is stored in `data/bot.db` (SQLite) unless `DATABASE_URL` points to Postgre
 Logs, including startup errors, are also written to `data/bot.log`: open it in the
 host's file manager when the host's log viewer shows nothing.
 
+AI lyrics: the models in `OPENROUTER_MODEL` are tried in order, each for at most
+`OPENROUTER_TIMEOUT` seconds (default 30), so an answer or an error comes in about
+a minute and a half at worst. When OpenRouter answers 429 (free models: about 20
+requests a minute, 50 a day on an account with no credits bought), the user is told
+when to try again. The bot itself limits only the drafts per order (`LYRICS_DRAFTS_MAX`).
+
+Video generation isn't connected yet: the 🎬 button says it's in development and charges nothing.
+
 ## Admin commands
 
 Only for MAX user ids listed in `ADMIN_IDS` (comma-separated). To find your id,

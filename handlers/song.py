@@ -2,9 +2,15 @@
 
 Every button tap is answered at once by removing that message's buttons (its text
 stays), so a slow step can't be triggered twice; results arrive as new messages.
+Answering the tap and the "typing…" indicator are cosmetic: when MAX fails or is
+slow to do them, the flow goes on without them.
 """
 
+import asyncio
 import logging
+import math
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from maxapi import F, Router
 from maxapi.context import BaseContext, State, StatesGroup
@@ -13,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import crud
-from database.models import GenerationKind, GenerationStatus, SongMode, User
+from database.models import GenerationKind, SongMode, User
 from keyboards import (
     CUSTOM_STYLE,
     SONG_STYLES,
@@ -30,7 +36,7 @@ from keyboards import (
     style_kb,
 )
 from services import MusicService
-from services.ai import AIService
+from services.ai import AIService, LyricsError, LyricsRateLimited
 
 logger = logging.getLogger(__name__)
 router = Router(router_id="song")
@@ -39,7 +45,8 @@ STYLE_MAX = 120
 LYRICS_MAX = 3000
 DESCRIPTION_MAX = 500
 PREVIEW_MAX = 300
-LYRICS_DRAFTS_MAX = 5  # AI drafts per order: the first one plus 4 regenerations
+TYPING_INTERVAL = 4.0  # seconds between "typing…" refreshes; MAX shows one for about 5 s
+ANSWER_TIMEOUT = 10.0  # seconds to wait for MAX to take a tap's answer before going on without it
 
 MODE_LABELS = {SongMode.LYRICS: "свой текст", SongMode.DESCRIPTION: "текст от ИИ"}
 
@@ -50,6 +57,8 @@ REDRAFT_FAILED = (
     "😔 Не получилось написать новый текст. "
     "Можно создать песню с прошлым или попробовать ещё раз."
 )
+LAST_DRAFT = "ℹ️ Это последний вариант для этого заказа: создай песню с ним или начни заказ заново."
+BUSY = "⏳ Бесплатная нейросеть сейчас перегружена: слишком много запросов. Попробуй {when}."
 USE_LATEST = "Используй кнопки под последним текстом."
 SUBMITTED = "🎶 Песня создаётся! Пришлю её сюда, как только будет готова."
 SUBMIT_FAILED = "😔 Не удалось запустить генерацию. Средства вернулись на баланс."
@@ -91,8 +100,26 @@ def _summary(data: dict, user: User) -> str:
     )
 
 
-def _lyrics_text(lyrics: str) -> str:
-    return f"📝 Текст песни:\n\n{lyrics}\n\n💰 Создание песни: {settings.song_price}"
+def _lyrics_text(lyrics: str, last: bool = False) -> str:
+    text = f"📝 Текст песни:\n\n{lyrics}\n\n💰 Создание песни: {settings.song_price}"
+    return f"{text}\n\n{LAST_DRAFT}" if last else text
+
+
+def _can_redraft(version: int) -> bool:
+    """LYRICS_DRAFTS_MAX drafts per order (0: no limit): each one is a free-tier AI request."""
+    return not settings.lyrics_drafts_max or version < settings.lyrics_drafts_max
+
+
+def _when(seconds: float | None) -> str:
+    if seconds is None:
+        return "через пару минут"
+    minutes = max(1, math.ceil(seconds / 60))
+    if minutes == 1:
+        return "через минуту"
+    if minutes < 60:
+        return f"через {minutes} мин"
+    hours, minutes = divmod(minutes, 60)
+    return f"через {hours} ч {minutes} мин" if minutes else f"через {hours} ч"
 
 
 def _is_current(payload: SongCallback, data: dict) -> bool:
@@ -100,14 +127,50 @@ def _is_current(payload: SongCallback, data: dict) -> bool:
 
 
 async def _freeze(event: MessageCallback, notification: str | None = None) -> None:
-    """Answer the tap: keep the message text, remove its buttons."""
+    """Answer the tap: keep the message text, remove its buttons.
+
+    A failure only costs the cosmetics: the FSM state already stops a repeated tap.
+    """
     body = event.message.body if event.message else None
-    await event.answer(
-        notification=notification,
-        new_text=body.text if body else None,
-        attachments=[],
-        raise_if_not_exists=False,
-    )
+    try:
+        async with asyncio.timeout(ANSWER_TIMEOUT):
+            await event.answer(
+                notification=notification,
+                new_text=body.text if body else None,
+                attachments=[],
+                raise_if_not_exists=False,
+            )
+    except Exception as exc:
+        logger.warning("Could not answer the tap, going on: %r", exc)
+
+
+_typing_tasks: set[asyncio.Task] = set()  # running indicators; asyncio keeps only weak references
+
+
+@asynccontextmanager
+async def _typing(event: MessageCallback) -> AsyncIterator[None]:
+    """Show "typing…" while the AI works, from a background task.
+
+    maxapi's event.typing() awaits its MAX requests, so a slow request held up the draft,
+    and a failed one ended it, even after the AI had written the lyrics.
+    """
+
+    async def keep_typing() -> None:
+        while True:
+            try:
+                await event.action()
+            except Exception as exc:
+                logger.warning("Typing indicator stopped: %r", exc)
+                return
+            await asyncio.sleep(TYPING_INTERVAL)
+
+    task = asyncio.create_task(keep_typing())
+    _typing_tasks.add(task)
+    task.add_done_callback(_typing_tasks.discard)
+    try:
+        yield
+    finally:
+        task.cancel()  # not awaited: a hanging request must not delay the answer
 
 
 async def _send_insufficient_funds(event: MessageCallback, user: User) -> None:
@@ -117,17 +180,12 @@ async def _send_insufficient_funds(event: MessageCallback, user: User) -> None:
     )
 
 
-async def _draft(event: MessageCallback, ai: AIService, data: dict) -> str | None:
-    """An AI draft that fits the lyrics limit, or None if the AI failed."""
-    try:
-        async with event.typing():
-            lyrics = await ai.write_lyrics(data["text"], data["style"])
-    except Exception:
-        logger.exception("AI lyrics draft failed")
-        return None
+async def _draft(event: MessageCallback, ai: AIService, data: dict) -> str:
+    """An AI draft that fits the lyrics limit; LyricsError if there is none."""
+    async with _typing(event):
+        lyrics = await ai.write_lyrics(data["text"], data["style"])
     if len(lyrics) > LYRICS_MAX:
-        logger.warning("AI lyrics draft too long: %d chars", len(lyrics))
-        return None
+        raise LyricsError(f"AI lyrics draft too long: {len(lyrics)} chars")
     return lyrics
 
 
@@ -141,20 +199,28 @@ async def _write_lyrics(
     await session.commit()  # no DB transaction stays open while the AI works
     version = data.get("lyrics_version", 0)
 
-    lyrics = await _draft(event, ai, data)
-    if lyrics is None:
-        if version:  # the previous draft is still usable
-            await event.send(text=REDRAFT_FAILED, attachments=[lyrics_kb(version)])
-        else:  # state stays `confirm`, so "✅ Создать" retries
-            await event.send(text=DRAFT_FAILED, attachments=[confirm_kb()])
+    try:
+        lyrics = await _draft(event, ai, data)
+    except LyricsRateLimited as exc:
+        logger.warning("AI lyrics draft: %s", exc)
+        failure = BUSY.format(when=_when(exc.retry_after))
+    except Exception:
+        logger.exception("AI lyrics draft failed")
+        failure = REDRAFT_FAILED if version else DRAFT_FAILED
+    else:
+        failure = None
+    if failure is not None:
+        # A previous draft stays usable; without one the state stays `confirm`, so "✅ Создать" retries.
+        await event.send(text=failure, attachments=[lyrics_kb(version) if version else confirm_kb()])
         return
 
     version += 1
     await context.update_data(lyrics=lyrics, lyrics_version=version)
     await context.set_state(SongForm.lyrics)
+    can_redraft = _can_redraft(version)
     await event.send(
-        text=_lyrics_text(lyrics),
-        attachments=[lyrics_kb(version, can_regenerate=version < LYRICS_DRAFTS_MAX)],
+        text=_lyrics_text(lyrics, last=not can_redraft),
+        attachments=[lyrics_kb(version, can_regenerate=can_redraft)],
     )
 
 
@@ -310,7 +376,7 @@ async def on_regenerate(
     payload: SongCallback,
 ) -> None:
     data = await context.get_data()
-    if not _is_current(payload, data) or data["lyrics_version"] >= LYRICS_DRAFTS_MAX:
+    if not _is_current(payload, data) or not _can_redraft(data["lyrics_version"]):
         await event.answer(notification=USE_LATEST)
         return
 

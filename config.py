@@ -59,7 +59,10 @@ class Settings(BaseSettings):
 
     # --- AI lyrics (OpenRouter) ---
     openrouter_api_key: SecretStr | None = None
-    openrouter_model: str = "openrouter/free"
+    # Model ids, comma-separated, tried in order. Unset: services.ai.DEFAULT_MODELS
+    openrouter_model: str | None = None
+    openrouter_timeout: float = Field(default=30, gt=0, le=600)  # seconds per model, whole request
+    lyrics_drafts_max: int = Field(default=10, ge=0)  # AI drafts per song order; 0: no limit
 
     # --- Pricing (balance units) ---
     song_price: int = Field(default=1, ge=1)
