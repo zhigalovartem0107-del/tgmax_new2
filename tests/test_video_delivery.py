@@ -13,7 +13,7 @@ from database import Generation, GenerationKind, GenerationStatus, crud, session
 from database.models import utcnow
 from services.video import VideoError, VideoResult, VideoStatus
 
-VIDEO_URL = "https://cdn.agnes-ai.com/videos/video_1.mp4"
+VIDEO_URL = "https://videos.magichour.ai/id/output.mp4"
 MP4 = b"\x00\x00\x00\x18ftypmp42 fake video"
 
 
@@ -43,7 +43,7 @@ async def _paid(session, kind=GenerationKind.VIDEO, status=GenerationStatus.PROC
     await crud.add_balance(session, USER_ID, 10)
     order = await crud.start_paid_generation(session, USER_ID, kind, "кот на пляже", cost=10, mode="text")
     order.status = status
-    order.provider_task_id = "video_1" if status == GenerationStatus.PROCESSING else None
+    order.provider_task_id = "cuid-1" if status == GenerationStatus.PROCESSING else None
     order.created_at = utcnow() - age
     await session.commit()
     return order.id
@@ -57,11 +57,11 @@ async def _state(session, order_id):
 
 async def test_finished_video_is_sent_to_its_owner_as_a_video(bot, session):
     order_id = await _paid(session)
-    agnes = FakeVideo(VideoResult(VideoStatus.DONE, VIDEO_URL))
+    magic_hour = FakeVideo(VideoResult(VideoStatus.DONE, VIDEO_URL))
 
-    await delivery.deliver_videos(bot.bot, agnes, session_factory)
+    await delivery.deliver_videos(bot.bot, magic_hour, session_factory)
 
-    assert agnes.asked == ["video_1"]
+    assert magic_hour.asked == ["cuid-1"]
     [message] = bot.sent
     assert message.user_id == USER_ID and message.text == "🎬 Твоё видео готово!"
     [video] = [a for a in message.attachments if isinstance(a, InputMediaBuffer)]
@@ -98,13 +98,13 @@ async def test_stuck_video_is_refunded(bot, session):
 
 
 async def test_busy_or_unreachable_api_is_asked_again_later(bot, session):
-    """Agnes answering 429 or 5xx to a status check is no failure; only the time limit gives up."""
+    """Magic Hour answering 429 or 5xx to a status check is no failure; only the time limit gives up."""
     order_id = await _paid(session, age=timedelta(minutes=5))
 
-    await delivery.deliver_videos(bot.bot, FakeVideo(error=VideoError("Agnes HTTP 429: busy")), session_factory)
+    await delivery.deliver_videos(bot.bot, FakeVideo(error=VideoError("Magic Hour HTTP 429: busy")), session_factory)
     assert await _state(session, order_id) == (GenerationStatus.PROCESSING, 0)
 
-    late = FakeVideo(error=VideoError("Agnes HTTP 503"))
+    late = FakeVideo(error=VideoError("Magic Hour HTTP 503"))
     async with session_factory() as s:
         order = await s.get(Generation, order_id)
         order.created_at = utcnow() - delivery.VIDEO_TIMEOUT - timedelta(minutes=1)
@@ -130,7 +130,7 @@ async def test_failed_delivery_is_retried_later(bot, session, monkeypatch):
 
 
 async def test_order_stuck_before_submission_is_refunded(bot, session):
-    """Paid, but the bot stopped before Agnes took the order."""
+    """Paid, but the bot stopped before Magic Hour took the order."""
     stuck = await _paid(session, status=GenerationStatus.PENDING, age=timedelta(minutes=10))
     submitting = await _paid(session, status=GenerationStatus.PENDING)
 
@@ -142,11 +142,11 @@ async def test_order_stuck_before_submission_is_refunded(bot, session):
 
 async def test_songs_are_not_the_video_jobs_business(bot, session):
     song_id = await _paid(session, kind=GenerationKind.SONG)
-    agnes = FakeVideo(VideoResult(VideoStatus.FAILED, error="nope"))
+    magic_hour = FakeVideo(VideoResult(VideoStatus.FAILED, error="nope"))
 
-    await delivery.deliver_videos(bot.bot, agnes, session_factory)
+    await delivery.deliver_videos(bot.bot, magic_hour, session_factory)
 
-    assert agnes.asked == [] and await _state(session, song_id) == (GenerationStatus.PROCESSING, 0)
+    assert magic_hour.asked == [] and await _state(session, song_id) == (GenerationStatus.PROCESSING, 0)
 
 
 async def test_delivery_loop_survives_a_failing_pass(monkeypatch):

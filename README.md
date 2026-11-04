@@ -22,15 +22,17 @@ a minute and a half at worst. When OpenRouter answers 429 (free models: about 20
 requests a minute, 50 a day on an account with no credits bought), the user is told
 when to try again. The bot itself limits only the drafts per order (`LYRICS_DRAFTS_MAX`).
 
-Video: Agnes AI (`agnes-video-v2.0`, key in `AGNES_API_KEY`). 🎬 asks for a description and
-an optional photo for the first frame, charges `VIDEO_PRICE` (default: `SONG_PRICE`) and
-starts the video; `workers/video_delivery.py` checks it every 20 seconds, sends the finished
-video, and refunds one that failed or took over 30 minutes. The free plan takes one video a
-minute: when Agnes answers 429, the order is refunded, the user is told when to try again
-(Retry-After, else a minute), and nothing is sent to Agnes before that. The API is at
-`apihub.agnes-ai.cn`; `apihub.agnes-ai.com` is tried when it can't be reached
-(`AGNES_BASE_URL` changes the list). Without a key, 🎬 says video is in development and
-charges nothing.
+Video: Magic Hour (key in `MAGIC_HOUR_API_KEY`, from https://magichour.ai/developer). 🎬 asks
+for a description and an optional photo for the first frame, charges `VIDEO_PRICE` (default:
+`SONG_PRICE`) and starts the video; `workers/video_delivery.py` checks it every 20 seconds,
+sends the finished video, and refunds one that failed or took over 30 minutes. The default
+is `ltx-2.5` (the fastest), 480p, 4 seconds: 24 credits a second, so 96 credits a video,
+which fits the 100 free daily credits (`MAGIC_HOUR_VIDEO_MODEL`, `MAGIC_HOUR_VIDEO_SECONDS`
+change it, e.g. `wan-2.2`, `kling-3.0`, `veo3.1`, `sora-2`). A photo is uploaded to Magic
+Hour's storage first, since the API takes links only with a file extension. When Magic Hour
+answers 429, the order is refunded, the user is told when to try again (Retry-After, else a
+minute), and no order is sent before that. Without a key, 🎬 says video is in development
+and charges nothing.
 
 ## Admin commands
 
@@ -38,7 +40,7 @@ Only for MAX user ids listed in `ADMIN_IDS` (comma-separated). To find your id,
 send `/admin` to the bot: without access it replies with your id.
 
 - `/admin`: users, generations and balance totals
-- `/admin` → **🔑 API Ключи**: set or remove `ACEMUSIC_API_KEY`, `AGNES_API_KEY`, `VK_TOKEN`,
+- `/admin` → **🔑 API Ключи**: set or remove `ACEMUSIC_API_KEY`, `MAGIC_HOUR_API_KEY`, `VK_TOKEN`,
   `VK_COOKIES`, `TIKTOK_COOKIES`. A key saved there wins over the environment variable and is used at
   once, without a restart; 🗑 goes back to the environment variable. (The VK/TikTok keys are
   kept for the social sources, which aren't connected to the bot yet.) Keys are shown masked
@@ -85,7 +87,7 @@ services/
   ai.py            OpenRouter client that writes the lyrics
   keys.py          API keys saved in the bot, falling back to the environment
   music.py         acemusic.ai client for ACE-Step songs
-  video.py         Agnes AI client for videos
+  video.py         Magic Hour client for videos
   ratelimit.py     reads how long a 429 answer says to wait
   yookassa.py      YooKassa payments client
 workers/

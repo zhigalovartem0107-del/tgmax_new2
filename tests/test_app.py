@@ -8,7 +8,7 @@ import app
 from services.video import VideoService
 
 
-async def test_main_runs_the_video_job_with_the_handlers_agnes_service(monkeypatch):
+async def test_main_runs_the_video_job_with_the_handlers_video_service(monkeypatch):
     started, built, closed = {}, {}, []
 
     def job(name):

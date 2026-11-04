@@ -1,9 +1,9 @@
-"""Video flow: description → optional first frame (a photo) → confirm → charge → submit to Agnes AI.
+"""Video flow: description → optional first frame (a photo) → confirm → charge → submit to Magic Hour.
 
-Without AGNES_API_KEY the button says video is in development and charges nothing.
+Without MAGIC_HOUR_API_KEY the button says video is in development and charges nothing.
 The video arrives later: workers/video_delivery.py sends it, or refunds a failed order.
-Agnes takes 1 video a minute on the free plan: a refused order is refunded and kept,
-so "✅ Создать видео" can be tapped again after the wait the message names.
+An order Magic Hour refuses with "too many requests" is refunded and kept, so
+"✅ Создать видео" can be tapped again after the wait the message names.
 """
 
 import logging
@@ -42,7 +42,7 @@ ASK_IMAGE = (
     "Или нажми «Без картинки»."
 )
 NOT_A_PHOTO = "Пришли фото (как картинку, не файлом) или нажми «Без картинки»."
-BUSY = "⏳ Видео-нейросеть принимает один заказ в минуту. Попробуй {when}."
+BUSY = "⏳ Видео-сервис сейчас перегружен: слишком много запросов. Попробуй {when}."
 REFUNDED = "Средства вернулись на баланс."
 SUBMITTED = "🎬 Видео создаётся! Пришлю его сюда, как только будет готово — обычно это несколько минут."
 SUBMIT_FAILED = f"😔 Не удалось запустить создание видео. {REFUNDED}"
@@ -60,7 +60,7 @@ def _message_text(event: MessageCreated) -> str:
 
 
 def _photo_url(event: MessageCreated) -> str | None:
-    """The link of the first photo in the message: MAX serves it publicly, so Agnes can fetch it."""
+    """The link of the first photo in the message: MAX serves it publicly, so the bot can fetch it."""
     body = event.message.body
     for attachment in (body.attachments or []) if body else []:
         url = getattr(attachment.payload, "url", None)
@@ -146,7 +146,7 @@ async def on_confirm(
     await context.clear()  # a repeated tap no longer matches this handler
     await freeze(event)
 
-    if wait := video.wait_before_next():  # Agnes is sure to refuse it now: don't charge
+    if wait := video.wait_before_next():  # sure to be refused now: don't charge
         await _keep_for_retry(context, data)
         await event.send(text=BUSY.format(when=when(wait)), attachments=[video_confirm_kb()])
         return
@@ -166,7 +166,7 @@ async def on_confirm(
             attachments=[insufficient_funds_kb()],
         )
         return
-    await session.commit()  # the charge is stored before Agnes is called
+    await session.commit()  # the charge is stored before Magic Hour is called
 
     try:
         task_id = await video.generate_video(data["prompt"], image_url=image_url)
@@ -179,7 +179,7 @@ async def on_confirm(
         )
         return
     except Exception as exc:
-        logger.exception("Video %s: Agnes call failed", generation.id)
+        logger.exception("Video %s: Magic Hour call failed", generation.id)
         await crud.fail_generation(session, generation, repr(exc))
         await session.commit()  # the refund is stored before the user is told
         await event.send(text=SUBMIT_FAILED, attachments=[main_menu_kb()])
@@ -187,7 +187,7 @@ async def on_confirm(
 
     if not await crud.mark_processing(session, generation.id, task_id):
         await session.commit()
-        logger.warning("Video %s: refunded while Agnes was accepting it; result ignored", generation.id)
+        logger.warning("Video %s: refunded while Magic Hour was accepting it; result ignored", generation.id)
         return
     await session.commit()
     await event.send(text=SUBMITTED, attachments=[main_menu_kb()])

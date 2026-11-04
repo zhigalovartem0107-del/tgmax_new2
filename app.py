@@ -82,7 +82,7 @@ async def main() -> None:
         logger.warning("ACEMUSIC_API_KEY is not set (env or /admin → 🔑 API Ключи): songs will fail and be refunded")
     video = VideoService.from_settings(settings, keys=keys)
     if not video.configured:
-        logger.warning("AGNES_API_KEY is not set (env or /admin → 🔑 API Ключи): 🎬 says video is in development")
+        logger.warning("MAGIC_HOUR_API_KEY is not set (env or /admin → 🔑 API Ключи): 🎬 says video is in development")
 
     bot = Bot(token=settings.bot_token.get_secret_value())
     await sync_commands(bot)

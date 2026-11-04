@@ -203,7 +203,7 @@ async def bot(monkeypatch) -> BotHarness:
     keys = ApiKeys(session_factory, settings)
     await keys.load()
     music = MusicService(keys.getter("ACEMUSIC_API_KEY"))
-    video = VideoService(keys.getter("AGNES_API_KEY"))  # off until a test saves the key
+    video = VideoService(keys.getter("MAGIC_HOUR_API_KEY"))  # off until a test saves the key
     yookassa = FakeYooKassa()
     dp = app.build_dispatcher(ai, music, yookassa, keys, video)
     await dp.startup(max_bot)  # same preparation start_polling does

@@ -2,7 +2,7 @@
 
 Every POLL_SECONDS it checks the paid video orders that are not finished yet. The
 state lives in the database, so orders in progress survive a bot restart. A status
-check that Agnes answers with 429 or 5xx is simply asked again on the next pass.
+check that Magic Hour answers with 429 or 5xx is simply asked again on the next pass.
 """
 
 import asyncio
@@ -22,8 +22,8 @@ from services.video import VideoError, VideoService, VideoStatus
 logger = logging.getLogger(__name__)
 
 POLL_SECONDS = 20
-VIDEO_TIMEOUT = timedelta(minutes=30)  # Agnes never finished it
-SUBMIT_TIMEOUT = timedelta(minutes=5)  # paid, but the bot stopped before Agnes took it
+VIDEO_TIMEOUT = timedelta(minutes=30)  # Magic Hour never finished it
+SUBMIT_TIMEOUT = timedelta(minutes=5)  # paid, but the bot stopped before Magic Hour took it
 
 VIDEO_READY = "🎬 Твоё видео готово!"
 VIDEO_FAILED = "😔 Не удалось создать видео. Средства вернулись на баланс."
@@ -75,13 +75,13 @@ async def _check_video(
 
         if order.status == GenerationStatus.PENDING:
             if age > SUBMIT_TIMEOUT:
-                await _refund(bot, session, order, "never reached Agnes")
+                await _refund(bot, session, order, "never reached Magic Hour")
             return
 
         try:
             result = await video.get_result(order.provider_task_id)
         except VideoError as exc:
-            logger.warning("Video %s: Agnes check failed: %s", order.id, exc)
+            logger.warning("Video %s: Magic Hour check failed: %s", order.id, exc)
             result = None
 
         if result is not None and result.status == VideoStatus.FAILED:

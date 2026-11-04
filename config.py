@@ -53,10 +53,13 @@ class Settings(BaseSettings):
     music_model: str | None = None  # unset: the first model the API lists
     music_duration: int | None = Field(default=None, ge=5, le=240)  # seconds
 
-    # --- Video: Agnes AI (defaults in services/video.py) ---
-    agnes_api_key: SecretStr | None = None
-    agnes_base_url: str | None = None  # comma-separated, tried in order
-    agnes_video_model: str | None = None
+    # --- Video: Magic Hour (defaults in services/video.py) ---
+    magic_hour_api_key: SecretStr | None = Field(  # MAGIC_HOUR_API_TOKEN is the SDK's name for it
+        default=None, validation_alias=AliasChoices("MAGIC_HOUR_API_KEY", "MAGIC_HOUR_API_TOKEN")
+    )
+    magic_hour_base_url: str | None = None  # e.g. a proxy
+    magic_hour_video_model: str | None = None
+    magic_hour_video_seconds: int | None = Field(default=None, ge=1, le=60)
 
     # --- AI lyrics (OpenRouter) ---
     openrouter_api_key: SecretStr | None = None
