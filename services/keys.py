@@ -24,6 +24,7 @@ class KeySpec:
 
 KEYS = (
     KeySpec("ACEMUSIC_API_KEY", "ACE Music", lambda s: s.music_api_key),  # MUSIC_API_KEY works too
+    KeySpec("AGNES_API_KEY", "Agnes видео", lambda s: s.agnes_api_key),
     KeySpec("VK_TOKEN", "VK токен", lambda s: s.vk_token),
     KeySpec("VK_COOKIES", "VK cookies", lambda s: s.vk_cookies),
     KeySpec("TIKTOK_COOKIES", "TikTok cookies", lambda s: s.tiktok_cookies),

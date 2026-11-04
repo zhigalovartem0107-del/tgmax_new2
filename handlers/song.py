@@ -8,7 +8,6 @@ slow to do them, the flow goes on without them.
 
 import asyncio
 import logging
-import math
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -20,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import crud
 from database.models import GenerationKind, SongMode, User
+from handlers.common import freeze as _freeze
+from handlers.common import when as _when
 from keyboards import (
     CUSTOM_STYLE,
     SONG_STYLES,
@@ -46,7 +47,6 @@ LYRICS_MAX = 3000
 DESCRIPTION_MAX = 500
 PREVIEW_MAX = 300
 TYPING_INTERVAL = 4.0  # seconds between "typing…" refreshes; MAX shows one for about 5 s
-ANSWER_TIMEOUT = 10.0  # seconds to wait for MAX to take a tap's answer before going on without it
 
 MODE_LABELS = {SongMode.LYRICS: "свой текст", SongMode.DESCRIPTION: "текст от ИИ"}
 
@@ -110,38 +110,8 @@ def _can_redraft(version: int) -> bool:
     return not settings.lyrics_drafts_max or version < settings.lyrics_drafts_max
 
 
-def _when(seconds: float | None) -> str:
-    if seconds is None:
-        return "через пару минут"
-    minutes = max(1, math.ceil(seconds / 60))
-    if minutes == 1:
-        return "через минуту"
-    if minutes < 60:
-        return f"через {minutes} мин"
-    hours, minutes = divmod(minutes, 60)
-    return f"через {hours} ч {minutes} мин" if minutes else f"через {hours} ч"
-
-
 def _is_current(payload: SongCallback, data: dict) -> bool:
     return payload.value == str(data.get("lyrics_version"))
-
-
-async def _freeze(event: MessageCallback, notification: str | None = None) -> None:
-    """Answer the tap: keep the message text, remove its buttons.
-
-    A failure only costs the cosmetics: the FSM state already stops a repeated tap.
-    """
-    body = event.message.body if event.message else None
-    try:
-        async with asyncio.timeout(ANSWER_TIMEOUT):
-            await event.answer(
-                notification=notification,
-                new_text=body.text if body else None,
-                attachments=[],
-                raise_if_not_exists=False,
-            )
-    except Exception as exc:
-        logger.warning("Could not answer the tap, going on: %r", exc)
 
 
 _typing_tasks: set[asyncio.Task] = set()  # running indicators; asyncio keeps only weak references

@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from config import Settings, settings
 from database import Generation, GenerationStatus, crud
+from handlers import common
 from handlers import song as song_handlers
 from handlers.song import LYRICS_MAX, STYLE_MAX
 from services import MusicService
@@ -408,7 +409,7 @@ async def test_hanging_typing_indicator_does_not_hold_up_the_lyrics(bot, session
 @pytest.mark.parametrize("trouble", ["fails", "hangs"])
 async def test_tap_answer_trouble_does_not_skip_the_lyrics(bot, session, ai, monkeypatch, trouble):
     """Removing the tapped buttons is cosmetic: the draft goes on if MAX fails or is slow to do it."""
-    monkeypatch.setattr(song_handlers, "ANSWER_TIMEOUT", 0.05, raising=False)
+    monkeypatch.setattr(common, "ANSWER_TIMEOUT", 0.05)
     await bot.start()
     await _fund(session, PRICE)
     await _order_ai_rock_song(bot)

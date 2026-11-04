@@ -28,6 +28,7 @@ from database import Base, close_db, engine, session_factory  # noqa: E402
 from services.ai import AIService  # noqa: E402
 from services.keys import ApiKeys  # noqa: E402
 from services.music import MusicService  # noqa: E402
+from services.video import VideoService  # noqa: E402
 
 USER_ID = 777
 CHAT_ID = 555
@@ -41,12 +42,15 @@ USER = {
 }
 
 
-def _message(text: str) -> dict[str, Any]:
+def _message(text: str | None, attachments: list[dict] | None = None) -> dict[str, Any]:
+    body: dict[str, Any] = {"mid": "mid.1", "seq": 1, "text": text}
+    if attachments:
+        body["attachments"] = attachments
     return {
         "sender": USER,
         "recipient": {"chat_id": CHAT_ID, "chat_type": "dialog", "user_id": USER_ID},
         "timestamp": 1,
-        "body": {"mid": "mid.1", "seq": 1, "text": text},
+        "body": body,
     }
 
 
@@ -122,6 +126,11 @@ class BotHarness:
     async def text(self, text: str) -> None:
         await self._feed({"update_type": "message_created", "timestamp": 1, "message": _message(text)})
 
+    async def photo(self, url: str) -> None:
+        """A photo as MAX sends it: an image attachment with a public link."""
+        image = {"type": "image", "payload": {"photo_id": 1, "token": "photo-token", "url": url}}
+        await self._feed({"update_type": "message_created", "timestamp": 1, "message": _message(None, [image])})
+
     async def tap(self, button_text: str, message: Sent | None = None) -> None:
         """Press a button by its label on `message` (default: the last message sent)."""
         payload = (message or self.last).buttons[button_text]
@@ -194,8 +203,9 @@ async def bot(monkeypatch) -> BotHarness:
     keys = ApiKeys(session_factory, settings)
     await keys.load()
     music = MusicService(keys.getter("ACEMUSIC_API_KEY"))
+    video = VideoService(keys.getter("AGNES_API_KEY"))  # off until a test saves the key
     yookassa = FakeYooKassa()
-    dp = app.build_dispatcher(ai, music, yookassa, keys)
+    dp = app.build_dispatcher(ai, music, yookassa, keys, video)
     await dp.startup(max_bot)  # same preparation start_polling does
     harness = BotHarness(max_bot, dp, sent, yookassa)
     harness.deleted, harness.keys, harness.music_key = deleted, keys, music._key
@@ -203,3 +213,4 @@ async def bot(monkeypatch) -> BotHarness:
     await max_bot.close_session()
     await ai.close()
     await music.close()
+    await video.close()

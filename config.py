@@ -53,9 +53,10 @@ class Settings(BaseSettings):
     music_model: str | None = None  # unset: the first model the API lists
     music_duration: int | None = Field(default=None, ge=5, le=240)  # seconds
 
-    # --- Video (not connected yet) ---
-    video_api_url: str | None = None
-    video_api_key: SecretStr | None = None
+    # --- Video: Agnes AI (defaults in services/video.py) ---
+    agnes_api_key: SecretStr | None = None
+    agnes_base_url: str | None = None  # comma-separated, tried in order
+    agnes_video_model: str | None = None
 
     # --- AI lyrics (OpenRouter) ---
     openrouter_api_key: SecretStr | None = None
@@ -66,8 +67,13 @@ class Settings(BaseSettings):
 
     # --- Pricing (balance units) ---
     song_price: int = Field(default=1, ge=1)
+    video_price: int | None = Field(default=None, ge=1)  # unset: SONG_PRICE
 
     log_level: str = "INFO"
+
+    @property
+    def video_cost(self) -> int:
+        return self.video_price or self.song_price
 
     @property
     def packages(self) -> list[tuple[int, int]]:

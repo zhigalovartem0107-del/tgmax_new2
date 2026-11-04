@@ -15,9 +15,11 @@ from middlewares import DbSessionMiddleware, ServicesMiddleware, UserMiddleware
 from services import MusicService
 from services.ai import AIService
 from services.keys import ApiKeys
+from services.video import VideoService
 from services.yookassa import YooKassaService
 from workers.payments import run_payment_worker
 from workers.song_delivery import run_song_delivery
+from workers.video_delivery import run_video_delivery
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,7 @@ def build_dispatcher(
     music: MusicService,
     yookassa: YooKassaService | None = None,
     keys: ApiKeys | None = None,
+    video: VideoService | None = None,
 ) -> Dispatcher:
     # Updates from different users run concurrently (an AI call takes seconds);
     # updates from one user stay in order, so their FSM steps never race.
@@ -34,7 +37,9 @@ def build_dispatcher(
     # Inner middlewares run in registration order, only for updates some handler accepts.
     dp.register_inner_middleware(DbSessionMiddleware(session_factory))
     dp.register_inner_middleware(UserMiddleware())
-    dp.register_inner_middleware(ServicesMiddleware(music=music, ai=ai, yookassa=yookassa, keys=keys))
+    dp.register_inner_middleware(
+        ServicesMiddleware(music=music, ai=ai, yookassa=yookassa, keys=keys, video=video or VideoService(None))
+    )
     dp.include_routers(*get_routers())
     return dp
 
@@ -75,16 +80,22 @@ async def main() -> None:
     music = MusicService.from_settings(settings, keys=keys)
     if not keys.get("ACEMUSIC_API_KEY"):
         logger.warning("ACEMUSIC_API_KEY is not set (env or /admin → 🔑 API Ключи): songs will fail and be refunded")
+    video = VideoService.from_settings(settings, keys=keys)
+    if not video.configured:
+        logger.warning("AGNES_API_KEY is not set (env or /admin → 🔑 API Ключи): 🎬 says video is in development")
 
     bot = Bot(token=settings.bot_token.get_secret_value())
     await sync_commands(bot)
     yookassa = YooKassaService.from_settings(settings)
     if not yookassa.configured:
         logger.warning("YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY are not set: /shop can't take payments")
-    dp = build_dispatcher(ai, music, yookassa, keys)
+    dp = build_dispatcher(ai, music, yookassa, keys, video=video)
     stop_tasks = install_stop_signals(dp)
-    delivery = asyncio.create_task(run_song_delivery(bot, music, session_factory))
-    payments = asyncio.create_task(run_payment_worker(bot, dp, yookassa, session_factory))
+    jobs = [
+        asyncio.create_task(run_song_delivery(bot, music, session_factory)),
+        asyncio.create_task(run_video_delivery(bot, video, session_factory)),
+        asyncio.create_task(run_payment_worker(bot, dp, yookassa, session_factory)),
+    ]
 
     logger.info("Bot is starting")
     try:
@@ -92,7 +103,7 @@ async def main() -> None:
     finally:
         if stop_tasks:
             await asyncio.gather(*stop_tasks, return_exceptions=True)
-        for task in (delivery, payments):
+        for task in jobs:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
@@ -100,5 +111,6 @@ async def main() -> None:
         await bot.close_session()
         await ai.close()
         await music.close()
+        await video.close()
         await close_db()
         logger.info("Bot stopped")

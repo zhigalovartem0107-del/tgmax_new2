@@ -9,6 +9,7 @@ from database.models import (
     PaymentStatus,
     SongMode,
     User,
+    VideoMode,
 )
 
 __all__ = [
@@ -21,6 +22,7 @@ __all__ = [
     "PaymentStatus",
     "SongMode",
     "User",
+    "VideoMode",
     "close_db",
     "engine",
     "init_db",

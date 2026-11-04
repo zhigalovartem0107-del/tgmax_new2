@@ -143,6 +143,11 @@ class SongMode(StrEnum):
     DESCRIPTION = "description"  # the AI writes lyrics from a description
 
 
+class VideoMode(StrEnum):
+    TEXT = "text"  # from the description alone
+    IMAGE = "image"  # the user's photo is the first frame
+
+
 class Generation(Base):
     __tablename__ = "generations"
 
